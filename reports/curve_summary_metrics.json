@@ -1,0 +1,126 @@
+{
+  "analysis_date_range": {
+    "start": "2006-02-15",
+    "end": "2026-09-17",
+    "n_trading_days": 5152
+  },
+  "pca_variance_explained": {
+    "levels": {
+      "R2_1": 0.921464677006077,
+      "R2_2": 0.9885185649301803,
+      "R2_3": 0.9979342366672672
+    },
+    "changes": {
+      "R2_1": 0.6580597605587765,
+      "R2_2": 0.8370028268728675,
+      "R2_3": 0.9196404282009101
+    }
+  },
+  "pca_vs_nelson_siegel_correlations": {
+    "level_vs_pc1": 0.621534853407691,
+    "slope_vs_pc2": -0.6651490847192132,
+    "curvature_vs_pc3": 0.7279566887584092,
+    "full_matrix": {
+      "PC1": {
+        "PC1": 1.0,
+        "PC2": 3.9580413387449575e-15,
+        "PC3": 2.3641317666978773e-15,
+        "level": 0.621534853407691,
+        "slope": 0.7454337128477382,
+        "curvature": 0.5185123237017011
+      },
+      "PC2": {
+        "PC1": 3.9580413387449575e-15,
+        "PC2": 1.0,
+        "PC3": -7.992574592321945e-17,
+        "level": 0.7556969754790518,
+        "slope": -0.6651490847192132,
+        "curvature": -0.44807832836960865
+      },
+      "PC3": {
+        "PC1": 2.3641317666978773e-15,
+        "PC2": -7.992574592321945e-17,
+        "PC3": 1.0,
+        "level": -0.2063953591366341,
+        "slope": -0.043500755084644925,
+        "curvature": 0.7279566887584092
+      },
+      "level": {
+        "PC1": 0.621534853407691,
+        "PC2": 0.7556969754790518,
+        "PC3": -0.2063953591366341,
+        "level": 1.0,
+        "slope": -0.03034733409208549,
+        "curvature": -0.1666695606306151
+      },
+      "slope": {
+        "PC1": 0.7454337128477382,
+        "PC2": -0.6651490847192132,
+        "PC3": -0.043500755084644925,
+        "level": -0.03034733409208549,
+        "slope": 1.0,
+        "curvature": 0.6528159852922856
+      },
+      "curvature": {
+        "PC1": 0.5185123237017011,
+        "PC2": -0.44807832836960865,
+        "PC3": 0.7279566887584092,
+        "level": -0.1666695606306151,
+        "slope": 0.6528159852922856,
+        "curvature": 1.0
+      }
+    }
+  },
+  "gsw_benchmark_evaluation": {
+    "overall_rmse_bp": 13.666,
+    "metrics_by_tenor": {
+      "DGS1": {
+        "maturity_years": 1.0,
+        "gsw_benchmark_column": "SVENPY01",
+        "rmse_bp": 16.95,
+        "mae_bp": 14.78,
+        "bias_bp": -14.62,
+        "sample_count": 5148
+      },
+      "DGS2": {
+        "maturity_years": 2.0,
+        "gsw_benchmark_column": "SVENPY02",
+        "rmse_bp": 9.5,
+        "mae_bp": 7.8,
+        "bias_bp": -7.25,
+        "sample_count": 5148
+      },
+      "DGS5": {
+        "maturity_years": 5.0,
+        "gsw_benchmark_column": "SVENPY05",
+        "rmse_bp": 11.86,
+        "mae_bp": 9.81,
+        "bias_bp": 9.2,
+        "sample_count": 5148
+      },
+      "DGS10": {
+        "maturity_years": 10.0,
+        "gsw_benchmark_column": "SVENPY10",
+        "rmse_bp": 12.07,
+        "mae_bp": 8.48,
+        "bias_bp": 1.42,
+        "sample_count": 5148
+      },
+      "DGS30": {
+        "maturity_years": 30.0,
+        "gsw_benchmark_column": "SVENPY30",
+        "rmse_bp": 17.95,
+        "mae_bp": 15.11,
+        "bias_bp": -12.82,
+        "sample_count": 5148
+      }
+    },
+    "comparison_dates_count": 5148
+  },
+  "svensson_case_study": {
+    "date": "2023-06-01",
+    "ns_rmse_bp": 17.23,
+    "svensson_rmse_bp": 5.42,
+    "improvement_bp": 11.81
+  }
+}

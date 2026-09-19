@@ -27,3 +27,4 @@ data/raw/futures/*.csv
 .idea/
 *.swp
 *.swo
+*.egg-info/
