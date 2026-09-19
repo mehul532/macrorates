@@ -1,0 +1,83 @@
+{
+  "source": "Federal Reserve Bank of St. Louis (FRED) / U.S. Department of the Treasury",
+  "retrieval_timestamp": "2026-09-19T21:47:50.972228+00:00",
+  "series": [
+    "DGS1MO",
+    "DGS3MO",
+    "DGS6MO",
+    "DGS1",
+    "DGS2",
+    "DGS3",
+    "DGS5",
+    "DGS7",
+    "DGS10",
+    "DGS20",
+    "DGS30"
+  ],
+  "units": "Percent per annum, annualized",
+  "frequency": "Business daily",
+  "first_observation": "1962-01-02",
+  "last_observation": "2026-09-17",
+  "missingness": {
+    "total_calendar_days": 23635,
+    "business_days": 16883,
+    "observed_trading_days": 16163,
+    "expected_holidays": 7452,
+    "series_not_started_days": 0,
+    "known_discontinuity_days": 0,
+    "unexpected_gaps": 20,
+    "coverage_ratio_trading_days": 0.999,
+    "maturity_coverage": {
+      "DGS1MO": 1.0,
+      "DGS3MO": 0.9994,
+      "DGS6MO": 0.9994,
+      "DGS1": 0.9988,
+      "DGS2": 0.999,
+      "DGS3": 0.9988,
+      "DGS5": 0.9988,
+      "DGS7": 0.9986,
+      "DGS10": 0.9988,
+      "DGS20": 0.9986,
+      "DGS30": 0.9989
+    },
+    "unexpected_gap_dates": [
+      "1971-10-11",
+      "1972-10-09",
+      "1973-02-12",
+      "1973-10-08",
+      "1974-02-12",
+      "1975-02-12",
+      "1976-02-12",
+      "1978-02-13",
+      "1978-05-30",
+      "1979-02-12",
+      "1979-05-30",
+      "1980-02-12",
+      "1981-02-12",
+      "1981-11-03",
+      "1982-02-12",
+      "1982-11-02",
+      "1983-11-08",
+      "1984-02-13",
+      "1984-11-06",
+      "1985-02-12"
+    ]
+  },
+  "transformation": "Raw constant maturity par-equivalent yields in percent; statutory issuance suspensions (e.g. DGS30 2002-2006, DGS20 1987-1993) strictly masked to NaN",
+  "extra": {
+    "dataset_type": "CMT_yield_panel",
+    "maturities_years": {
+      "DGS1MO": 0.08333333333333333,
+      "DGS3MO": 0.25,
+      "DGS6MO": 0.5,
+      "DGS1": 1.0,
+      "DGS2": 2.0,
+      "DGS3": 3.0,
+      "DGS5": 5.0,
+      "DGS7": 7.0,
+      "DGS10": 10.0,
+      "DGS20": 20.0,
+      "DGS30": 30.0
+    }
+  }
+}

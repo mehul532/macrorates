@@ -1,0 +1,29 @@
+# Virtual environment
+.venv/
+env/
+venv/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Data cache (raw files are re-downloadable)
+data/raw/fred/*.csv
+data/raw/gsw/*.csv
+data/raw/macro/*.csv
+data/raw/futures/*.csv
+!data/raw/**/.gitkeep
+!data/processed/.gitkeep
+
+# IDE and OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
