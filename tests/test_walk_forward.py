@@ -155,11 +155,13 @@ def test_walk_forward_evaluation_run():
     eval_res = harness.run_walk_forward_evaluation(strategy_type="2s10s", max_folds=2)
     
     table = eval_res["baseline_table"]
-    assert len(table) == 5
+    assert len(table) == 6
     assert "Random + Walk" in table.index
     assert "PCA + VAR" in table.index
+    assert "Static + NS" in table.index
     assert "DNS + Kalman" in table.index
     assert "DNS + Kalman + Macro" in table.index
+    assert "GBM" in table.index
     assert "OOS Curve RMSE (bp)" in table.columns
     assert "Factor Forecast RMSE (bp)" in table.columns
     assert "Strategy Sharpe" in table.columns

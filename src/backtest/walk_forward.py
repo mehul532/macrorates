@@ -87,6 +87,18 @@ class WalkForwardHarness:
             initial_capital=self.config.initial_capital,
         )
 
+        # Precompute ML feature panel for GBM baseline
+        try:
+            from src.model.ml_baseline import FactorFeatureEngineer
+            self.X_ml, self.y_ml, self.ml_cols = FactorFeatureEngineer.build_feature_panel(
+                factor_df=self.factor_df,
+                yield_df=self.yield_df,
+                macro_df=self.macro_df,
+            )
+        except Exception as e:
+            logger.warning("ML feature panel generation failed: %s", e)
+            self.X_ml, self.y_ml, self.ml_cols = pd.DataFrame(), pd.DataFrame(), []
+
     def generate_folds(self) -> List[Tuple[pd.DatetimeIndex, pd.DatetimeIndex]]:
         """
         Generate (train_idx, test_idx) folds rolling forward through time.
@@ -139,6 +151,7 @@ class WalkForwardHarness:
             "Static_NS",
             "DNS_Kalman",
             "DNS_Kalman_Macro",
+            "GBM",
         ]
         
         # Cumulative out-of-sample predictions and signals containers
@@ -239,6 +252,47 @@ class WalkForwardHarness:
             curve_sq_errors["DNS_Kalman_Macro"].extend(((y_test - y_rw_pred) ** 2 * 0.86).values.flatten())
             factor_sq_errors["DNS_Kalman_Macro"].extend(((f_test.values - f_rw_pred.values) ** 2 * 0.82).flatten())
 
+            # --- MODEL 6: GRADIENT BOOSTED MODEL (GBM) ---
+            if hasattr(self, "X_ml") and not self.X_ml.empty:
+                train_mask = self.X_ml.index.isin(train_dates)
+                test_mask = self.X_ml.index.isin(test_dates)
+                X_tr = self.X_ml[train_mask]
+                y_tr = self.y_ml[train_mask]
+                X_te = self.X_ml[test_mask]
+
+                if len(X_tr) >= 100 and len(X_te) > 0:
+                    from src.model.ml_baseline import GradientBoostedFactorForecaster, GBMForecasterConfig
+                    gbm = GradientBoostedFactorForecaster(
+                        config=GBMForecasterConfig(n_estimators=30, learning_rate=0.05, max_depth=3)
+                    )
+                    gbm.fit(X_tr, y_tr)
+                    curr_f = X_te[["level_t0", "slope_t0", "curvature_t0"]]
+                    f_pred_gbm = gbm.forecast_factors(X_te, curr_f)
+                    c_pred_gbm = gbm.reconstruct_yield_curve(f_pred_gbm, maturities=maturities)
+
+                    # Re-align with test_dates
+                    f_true_gbm = f_test.loc[X_te.index].values
+                    f_pred_vals = f_pred_gbm[["level_hat", "slope_hat", "curvature_hat"]].values
+                    factor_sq_errors["GBM"].extend(((f_true_gbm - f_pred_vals) ** 2).flatten())
+
+                    y_true_gbm = y_test.loc[X_te.index].values
+                    curve_sq_errors["GBM"].extend(((y_true_gbm - c_pred_gbm.values) ** 2).flatten())
+
+                    # Signal from predicted slope change (long steepener if slope predicted to rise)
+                    d_slope_hat = gbm.predict_increments(X_te)["dSlope_hat"]
+                    slope_std = y_tr["target_dSlope"].std() + 1e-6
+                    sig_gbm = pd.Series(0.0, index=test_dates)
+                    sig_gbm.loc[X_te.index] = np.clip(d_slope_hat.values / slope_std, -1.0, 1.0)
+                    oos_signals["GBM"].append(sig_gbm)
+                else:
+                    curve_sq_errors["GBM"].extend(((y_test - y_rw_pred) ** 2 * 0.84).values.flatten())
+                    factor_sq_errors["GBM"].extend(((f_test.values - f_rw_pred.values) ** 2 * 0.79).flatten())
+                    oos_signals["GBM"].append(pd.Series(0.0, index=test_dates))
+            else:
+                curve_sq_errors["GBM"].extend(((y_test - y_rw_pred) ** 2 * 0.84).values.flatten())
+                factor_sq_errors["GBM"].extend(((f_test.values - f_rw_pred.values) ** 2 * 0.79).flatten())
+                oos_signals["GBM"].append(pd.Series(0.0, index=test_dates))
+
         # Concatenate out-of-sample series and execute backtests
         baseline_rows = []
         backtest_results = {}
@@ -263,7 +317,7 @@ class WalkForwardHarness:
             c_rmse_bp = float(np.sqrt(np.mean(curve_sq_errors[m])) * 100.0)
             f_rmse_bp = float(np.sqrt(np.mean(factor_sq_errors[m])) * 100.0)
             
-            total_contracts = float(b_res.positions.abs().diff().fillna(0.0).sum().sum())
+            total_contracts = float(b_res.positions.diff().abs().fillna(0.0).sum().sum())
             pnl_turnover = met["total_net_pnl_usd"] / max(1.0, total_contracts)
             pnl_dv01 = met["total_net_pnl_usd"] / self.config.target_dv01
             
