@@ -1,0 +1,56 @@
+# MacroRates: Named Economic Episodes and Calendar Sub-Periods Configuration
+# Explicit date ranges defined ex-ante to prevent post-hoc period selection.
+
+episodes:
+  pre_covid_normalization:
+    name: "Pre-COVID Normalization"
+    start_date: "2016-01-01"
+    end_date: "2019-12-31"
+    description: "Gradual balance sheet runoff and Federal Reserve policy rate normalization (0.25% to 2.50%), followed by mid-cycle insurance cuts in late 2019."
+    expected_curve_dynamic: "Bear flattening transitioning to bull steepening during 2019 cuts."
+
+  covid_shock:
+    name: "COVID-19 Crisis Shock"
+    start_date: "2020-01-01"
+    end_date: "2020-06-30"
+    description: "Global pandemic shock, March 2020 Treasury market liquidity dislocation, and emergency Fed rate cuts to 0.00%-0.25% Zero Lower Bound."
+    expected_curve_dynamic: "Extreme flight-to-quality followed by massive central bank intervention and steepening."
+
+  zlb_qe:
+    name: "Zero Lower Bound & Aggressive QE"
+    start_date: "2020-07-01"
+    end_date: "2021-12-31"
+    description: "Extended Zero Lower Bound policy with $120B/month Treasury and MBS purchases, economic recovery, and rising inflation expectations."
+    expected_curve_dynamic: "Bull steepening and anchored front end with intermediate yields rising."
+
+  inflation_hiking_shock_2022:
+    name: "2022-2023 Inflation Shock & Rapid Hiking Cycle"
+    start_date: "2022-01-01"
+    end_date: "2023-07-31"
+    description: "Post-pandemic inflation surge peaking >9%, aggressive 525 bp Fed hiking cycle (including consecutive 75 bp hikes), and severe yield curve inversion."
+    expected_curve_dynamic: "Violent bear flattening leading to deepest 2s10s inversion since 1981 (-108 bp)."
+
+  post_hiking_easing_cycle:
+    name: "Post-Hiking Plateau & Easing Cycle"
+    start_date: "2023-08-01"
+    end_date: "2026-09-17"
+    description: "Federal Reserve terminal rate plateau at 5.25%-5.50%, disinflation trend, initial rate cuts, and gradual curve disinversion."
+    expected_curve_dynamic: "Curve un-inversion and bull steepening as policy rates normalize."
+
+calendar_subperiods:
+  period_2006_2010:
+    name: "2006-2010 (GFC Era)"
+    start_date: "2006-02-09"
+    end_date: "2010-12-31"
+  period_2011_2015:
+    name: "2011-2015 (ZLB & Taper Tantrum)"
+    start_date: "2011-01-01"
+    end_date: "2015-12-31"
+  period_2016_2020:
+    name: "2016-2020 (Normalization & Pandemic)"
+    start_date: "2016-01-01"
+    end_date: "2020-12-31"
+  period_2021_2026:
+    name: "2021-2026 (Inflation Shock & Easing)"
+    start_date: "2021-01-01"
+    end_date: "2026-09-17"
