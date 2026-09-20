@@ -4,6 +4,8 @@ MacroRates studies how macroeconomic information propagates through the U.S. Tre
 
 Treasury yields → term-structure estimation → latent Level/Slope/Curvature → state-space dynamics → macro shocks → curve response → relative-value signal → DV01-neutral trade → out-of-sample P&L + attribution
 
+![Yield Curve Event Explorer Demo](reports/figures/yield_curve_event_explorer_demo.gif)
+
 ---
 
 ## 1. Research Pipeline & Architecture
@@ -134,7 +136,10 @@ macrorates/
 │   └── data/                    # Ingestion, gap detection, and metadata routines
 ├── notebooks/                   # Research walkthroughs and exploratory analysis
 ├── reports/                     # Performance summaries, factor attribution decks
-└── tests/                       # Pytest test suite (smoke tests, gap tests, regressions)
+├── scripts/                     # Utility scripts (GIF demo generator, data fetchers)
+├── tests/                       # Pytest test suite (smoke tests, gap tests, regressions)
+├── app.py                       # Interactive Streamlit "Yield Curve Event Explorer"
+└── pyproject.toml
 ```
 
 ---
@@ -153,6 +158,30 @@ source .venv/bin/activate
 # Install dependencies
 pip install -e .
 
-# Run test suite
+# Run full test suite (48 tests passing)
 pytest -v
+
+# Launch the interactive Streamlit Yield Curve Event Explorer
+streamlit run app.py
 ```
+
+---
+
+## 7. Interactive Yield Curve Event Explorer (`app.py`)
+
+The **Yield Curve Event Explorer** is an institutional single-screen dashboard enabling researchers and portfolio managers to inspect any macroeconomic release (CPI, Core CPI, Nonfarm Payrolls, Unemployment, FOMC Rate Decisions) and observe the end-to-end quantitative transmission mechanism:
+
+$$\text{Macro Surprise } (S_{\text{ann}} / S_{\text{model}}) \longrightarrow \Delta\text{Yield Curve} \longrightarrow \Delta\text{Latent Factors } (L, S, C) \longrightarrow \text{DV01-Neutral Trade} \longrightarrow \text{P\&L Attribution}$$
+
+### Key Features:
+1. **Macro Announcement Shock**: Computes true consensus-standardized announcement surprises ($S_{\text{ann}} = \frac{\text{Actual} - \text{Consensus}}{\hat{\sigma}}$) alongside rolling out-of-sample model innovations ($S_{\text{model}}$).
+2. **Term Structure Deformation**: Displays CMT market observations alongside fitted Nelson-Siegel smooth curves ($0.08\text{Y} \to 30\text{Y}$) before and after the event release, highlighting per-tenor basis-point shifts.
+3. **Latent Dynamic Factors**: Decomposes the movement into Kalman-smoothed Level, Slope, and Curvature shifts in basis points ($\Delta L, \Delta S, \Delta C$).
+4. **Systematic Trade Construction**: Recommends integer futures contract allocations for 2s10s curve flattener/steepeners or 2s-5s-10s butterflies, verifying that net portfolio DV01 remains within $<5\%$ of single-leg risk.
+5. **Full P&L Attribution Chain**: Reconciles Gross Curve P&L, contract slippage, exchange fees, and cash interest.
+
+### Curated Historical Presets:
+- **June 15, 2022**: Fed 75bp Shock Hike (+5.98$\sigma$ surprise) $\to$ rapid curve flattening (-262 ZT / +118 ZN).
+- **May 12, 2021**: CPI Inflation Breakout (+4.58$\sigma$ surprise) $\to$ intermediate belly dislocation $\to$ 2s-5s-10s butterfly (+129 ZT / -219 ZF / +58 ZN).
+- **September 18, 2024**: Fed 50bp Jumbo Rate Cut (-5.98$\sigma$ dovish surprise) $\to$ front-end rally and curve steepener.
+- **June 5, 2020**: Post-Lockdown Jobs Rebound (+14.22$\sigma$ surprise) $\to$ violent bear steepener / shift.

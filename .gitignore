@@ -12,6 +12,7 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+.cache/
 
 # Data cache (raw files are re-downloadable)
 data/raw/fred/*.csv
