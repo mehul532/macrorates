@@ -15,6 +15,13 @@ from src.futures.futures_analytics import (
     identify_cheapest_to_deliver,
 )
 
+from src.futures.basis import (
+    BasisResult,
+    RepoRatesIngestor,
+    CostOfCarryModel,
+    CashFuturesBasisAnalyzer,
+)
+
 __all__ = [
     "ContractSpec",
     "DeliverableBond",
@@ -28,4 +35,9 @@ __all__ = [
     "get_contract_roll_dates",
     "build_continuous_contract",
     "DatabentoFuturesClient",
+    "BasisResult",
+    "RepoRatesIngestor",
+    "CostOfCarryModel",
+    "CashFuturesBasisAnalyzer",
 ]
+
