@@ -10,6 +10,16 @@ from src.macro.macro_surprises import (
     run_pipeline,
 )
 
+from src.macro.dfm_nowcast import (
+    FREDMDLoader,
+    DynamicFactorModelDGR,
+    DFMNowcastSurprise,
+    ExtendedMacroCurveRegression,
+    DFMResult,
+    FRED_MD_CATEGORIES,
+    SERIES_GROUP_MAP,
+)
+
 __all__ = [
     "MACRO_SERIES_SPECS",
     "RealTimeMacroIngestor",
@@ -18,4 +28,12 @@ __all__ = [
     "MacroRegressionEngine",
     "plot_cpi_impulse_response",
     "run_pipeline",
+    "FREDMDLoader",
+    "DynamicFactorModelDGR",
+    "DFMNowcastSurprise",
+    "ExtendedMacroCurveRegression",
+    "DFMResult",
+    "FRED_MD_CATEGORIES",
+    "SERIES_GROUP_MAP",
 ]
+
