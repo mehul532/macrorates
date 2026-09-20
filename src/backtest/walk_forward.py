@@ -44,6 +44,7 @@ from src.state_space.state_space import (
 )
 from src.strategy.portfolio import allocate_2s10s_spread, allocate_2s5s10s_butterfly, compute_continuous_positions
 from src.strategy.backtest import RelativeValueBacktestEngine, CostModelV1Config, BacktestResult
+from src.strategy.signals import map_curve_forecast_to_spread_signal
 from src.backtest.contracts import ForecastRecord, ForecastLedger, ForecastStatus
 from src.macro.macro_surprises import CausalMacroResponseEstimator
 
@@ -197,6 +198,16 @@ class WalkForwardHarness:
             y_train = self.yield_df.loc[train_dates, tenor_cols]
             y_test = self.yield_df.loc[test_dates, tenor_cols]
             spreads_act = compute_observable_spreads(y_test.values, tenor_cols)
+            y_origin_all = np.vstack([y_train.values[-1:], y_test.values[:-1]])
+
+            # Training spread scale for standardizing forecast changes
+            train_spreads = compute_observable_spreads(y_train.values, tenor_cols)
+            if strategy_type == "2s10s" and "2s10s" in train_spreads:
+                train_spread_std = float(np.std(np.diff(train_spreads["2s10s"]))) + 1e-6
+            elif strategy_type in ("2s5s10s", "fly") and "2s5s10s" in train_spreads:
+                train_spread_std = float(np.std(np.diff(train_spreads["2s5s10s"]))) + 1e-6
+            else:
+                train_spread_std = 0.05
             
             # --- MODEL 1: RANDOM WALK ---
             # 1-step forecast is previous day's curve
@@ -245,12 +256,11 @@ class WalkForwardHarness:
             if "2s5s10s" in spreads_pca and "2s5s10s" in spreads_act:
                 fly_2s5s10s_sq_errors["PCA_VAR"].extend(((spreads_act["2s5s10s"] - spreads_pca["2s5s10s"]) ** 2).flatten())
                 
-            # Signal: mean-reversion of PCA slope (PC2) using strictly training statistics
-            tr_pc2 = pca_forecaster.train_scores_[:, 1]
-            tr_pc2_mean = float(np.mean(tr_pc2))
-            tr_pc2_std = float(np.std(tr_pc2)) + 1e-6
-            z_pca = (scores_obs_pca[:, 1] - tr_pc2_mean) / tr_pc2_std
-            sig_pca = pd.Series(-np.clip(z_pca / 2.0, -1.0, 1.0), index=test_dates)
+            # Signal: mapped from 1-step predicted yield curve into predicted observable spread change
+            sig_pca_arr = map_curve_forecast_to_spread_signal(
+                y_pred_pca, y_origin_all, tenor_cols, train_spread_std, strategy_type
+            )
+            sig_pca = pd.Series(sig_pca_arr, index=test_dates)
             oos_signals["PCA_VAR"].append(sig_pca)
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
@@ -282,11 +292,11 @@ class WalkForwardHarness:
             if "2s5s10s" in spreads_ns and "2s5s10s" in spreads_act:
                 fly_2s5s10s_sq_errors["Static_NS"].extend(((spreads_act["2s5s10s"] - spreads_ns["2s5s10s"]) ** 2).flatten())
                 
-            # Signal: mean-reversion of NS slope factor using strictly training statistics
-            tr_slope_mean = float(ns_forecaster.mu_[1])
-            tr_slope_std = float(ns_forecaster.train_slope_std_)
-            z_ns = (factors_obs_ns[:, 1] - tr_slope_mean) / tr_slope_std
-            sig_ns = pd.Series(-np.clip(z_ns / 2.0, -1.0, 1.0), index=test_dates)
+            # Signal: mapped from 1-step predicted yield curve into predicted observable spread change
+            sig_ns_arr = map_curve_forecast_to_spread_signal(
+                y_pred_ns, y_origin_all, tenor_cols, train_spread_std, strategy_type
+            )
+            sig_ns = pd.Series(sig_ns_arr, index=test_dates)
             oos_signals["Static_NS"].append(sig_ns)
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
@@ -340,12 +350,11 @@ class WalkForwardHarness:
             if "2s5s10s" in spreads_kf and "2s5s10s" in spreads_act:
                 fly_2s5s10s_sq_errors["DNS_Kalman"].extend(((spreads_act["2s5s10s"] - spreads_kf["2s5s10s"]) ** 2).flatten())
                 
-            # Mean reversion signal using strictly training filtered slope statistics
-            kf_tr_slope = dns_res.filtered_states["slope"].values
-            kf_tr_slope_mean = float(np.mean(kf_tr_slope))
-            kf_tr_slope_std = float(np.std(kf_tr_slope)) + 1e-6
-            z_kf = (beta_filt_kf[:, 1] - kf_tr_slope_mean) / kf_tr_slope_std
-            sig_kf = pd.Series(-np.clip(z_kf / 2.0, -1.0, 1.0), index=test_dates)
+            # Signal: mapped from 1-step predicted yield curve into predicted observable spread change
+            sig_kf_arr = map_curve_forecast_to_spread_signal(
+                y_pred_kf, y_origin_all, tenor_cols, train_spread_std, strategy_type
+            )
+            sig_kf = pd.Series(sig_kf_arr, index=test_dates)
             oos_signals["DNS_Kalman"].append(sig_kf)
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
@@ -390,11 +399,14 @@ class WalkForwardHarness:
                 ind = m_row.get("indicator")
                 surp = m_row.get("surprise_ann", np.nan)
                 if pd.notna(surp) and dt in macro_impulse.index:
-                    b_info = fold_macro_betas.get(ind, {"slope_beta": 0.0})
-                    b_slope = b_info.get("slope_beta", 0.0)
-                    macro_impulse.loc[dt] += b_slope * np.clip(surp, -2.0, 2.0)
+                    b_info = fold_macro_betas.get(ind, {"slope_beta": 0.0, "curvature_beta": 0.0})
+                    if strategy_type in ("2s5s10s", "fly"):
+                        b_target = b_info.get("curvature_beta", 0.0)
+                    else:
+                        b_target = b_info.get("slope_beta", 0.0)
+                    macro_impulse.loc[dt] += b_target * np.clip(surp, -2.0, 2.0)
             
-            sig_macro_dns = np.clip(0.6 * sig_kf + 0.4 * macro_impulse, -1.0, 1.0)
+            sig_macro_dns = np.clip(0.6 * sig_kf + 0.4 * (macro_impulse / train_spread_std), -1.0, 1.0)
             oos_signals["DNS_Kalman_Macro"].append(sig_macro_dns)
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
@@ -427,7 +439,6 @@ class WalkForwardHarness:
                         )
                         gbm.fit(X_tr, y_tr)
                         
-                        slope_std = float(y_tr["target_dSlope"].std()) + 1e-6
                         sig_gbm_series = pd.Series(0.0, index=test_dates)
 
                         for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
@@ -455,8 +466,10 @@ class WalkForwardHarness:
                                     fly_2s5s10s_sq_errors["GBM"].append(diff_fly ** 2)
 
                                 # Signal at tgt_dt based on forecast made at orig_dt
-                                d_slope = float(gbm.predict_increments(x_row)["dSlope_hat"].iloc[0])
-                                sig_gbm_series.loc[tgt_dt] = float(np.clip(d_slope / slope_std, -1.0, 1.0))
+                                sig_gbm_val = map_curve_forecast_to_spread_signal(
+                                    c_hat, y_origin_all[k], tenor_cols, train_spread_std, strategy_type
+                                )
+                                sig_gbm_series.loc[tgt_dt] = float(sig_gbm_val)
 
                                 for c_idx, c in enumerate(tenor_cols):
                                     ledger.add_record(ForecastRecord(
@@ -557,9 +570,9 @@ class WalkForwardHarness:
             s_rmse_bp = float(np.sqrt(np.mean(spread_2s10s_sq_errors[m])) * 100.0) if len(spread_2s10s_sq_errors[m]) > 0 else np.nan
             fly_rmse_bp = float(np.sqrt(np.mean(fly_2s5s10s_sq_errors[m])) * 100.0) if len(fly_2s5s10s_sq_errors[m]) > 0 else np.nan
             
-            total_contracts = float(b_res.positions.diff().abs().fillna(0.0).sum().sum())
-            pnl_turnover = met["total_net_pnl_usd"] / max(1.0, total_contracts)
-            pnl_dv01 = met["total_net_pnl_usd"] / self.config.target_dv01
+            total_contracts = met.get("contract_turnover_lots", 0)
+            pnl_turnover = met.get("pnl_turnover_usd_per_lot", np.nan)
+            pnl_dv01 = round(met.get("total_net_trading_pnl_usd", 0.0) / self.config.target_dv01, 2)
             
             baseline_rows.append({
                 "Model / Forecast Method": m.replace("_", " + "),
@@ -568,18 +581,19 @@ class WalkForwardHarness:
                 "2s10s Spread RMSE (bp)": round(s_rmse_bp, 2) if not np.isnan(s_rmse_bp) else np.nan,
                 "2s5s10s Fly RMSE (bp)": round(fly_rmse_bp, 2) if not np.isnan(fly_rmse_bp) else np.nan,
                 "Factor Forecast RMSE (bp)": round(f_rmse_bp, 2) if not np.isnan(f_rmse_bp) else np.nan,
-                "Strategy Sharpe": met.get("sharpe_ratio", 0.0),
-                "Sortino Ratio": met.get("sortino_ratio", 0.0),
+                "Strategy Sharpe": met.get("sharpe_ratio", np.nan),
+                "Sortino Ratio": met.get("sortino_ratio", np.nan),
                 "Max Drawdown (%)": met.get("max_drawdown_pct", 0.0),
                 "Annual Turnover (lots)": round(total_contracts / (len(full_sig)/252.0), 1),
                 "Hit Rate (%)": met.get("win_rate_pct", 0.0),
-                "PnL / DV01 ($)": round(pnl_dv01, 2),
-                "PnL / Turnover ($/lot)": round(pnl_turnover, 2),
+                "PnL / DV01 ($)": pnl_dv01,
+                "PnL / Turnover ($/lot)": pnl_turnover,
                 "Gross PnL ($)": met.get("total_gross_pnl_usd", 0.0),
                 "Trade Costs ($)": met.get("total_trade_cost_usd", 0.0),
                 "Roll Costs ($)": met.get("total_roll_cost_usd", 0.0),
+                "Trading Net PnL ($)": met.get("total_net_trading_pnl_usd", 0.0),
                 "Cash Interest ($)": met.get("total_interest_earned_usd", 0.0),
-                "Net PnL ($)": met.get("total_net_pnl_usd", 0.0),
+                "Collateral Net PnL ($)": met.get("total_collateral_pnl_usd", met.get("total_net_pnl_usd", 0.0)),
             })
             
         baseline_table = pd.DataFrame(baseline_rows).set_index("Model / Forecast Method")

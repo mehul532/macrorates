@@ -14,9 +14,11 @@ All rolling means, standard deviations, and event shocks use data strictly <= t.
 """
 
 import logging
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
+
+from src.curve.canonical import compute_observable_spreads
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -123,14 +125,18 @@ def compute_dns_factor_signals(
     s_ma = s.rolling(window=window, min_periods=min_periods).mean()
     s_std = s.rolling(window=window, min_periods=min_periods).std()
     z_slope = (s - s_ma) / (s_std + 1e-6)
-    # When slope factor is low/negative (flattened curve), expect mean reversion to steepen (+1)
-    signal_slope = -np.clip(z_slope / z_clip, -1.0, 1.0)
+    # In Nelson-Siegel, beta_slope (beta1) loading decreases with maturity:
+    # y(10Y) - y(2Y) ~= -0.39 * beta1. High beta1 means inverted/flat curve.
+    # Mean-reversion: when beta1 is unusually high (Z > 0, curve flat/inverted),
+    # expect curve to steepen (Signal > 0: Steepener: Long 2Y, Short 10Y).
+    signal_slope = np.clip(z_slope / z_clip, -1.0, 1.0)
     
     c = df[curvature_col]
     c_ma = c.rolling(window=window, min_periods=min_periods).mean()
     c_std = c.rolling(window=window, min_periods=min_periods).std()
     z_curv = (c - c_ma) / (c_std + 1e-6)
-    # When curvature factor is low (belly rich), expect mean reversion higher (+1: Long fly)
+    # Butterfly B = 2*y(5) - y(2) - y(10) has positive loading on beta2 (~ +0.05).
+    # When beta2 is unusually high (belly cheap), expect mean-reversion lower (Signal < 0: Short fly).
     signal_fly = -np.clip(z_curv / z_clip, -1.0, 1.0)
     
     res = pd.DataFrame(index=df.index)
@@ -171,7 +177,9 @@ def compute_svensson_factor_signals(
     s_ma = s.rolling(window=window, min_periods=min_periods).mean()
     s_std = s.rolling(window=window, min_periods=min_periods).std()
     z_slope = (s - s_ma) / (s_std + 1e-6)
-    signal_slope = -np.clip(z_slope / z_clip, -1.0, 1.0)
+    # In Svensson, beta1 loading decreases with maturity (Slope factor).
+    # High beta1 means flat/inverted curve. Mean-reversion implies steepening (Signal > 0).
+    signal_slope = np.clip(z_slope / z_clip, -1.0, 1.0)
 
     if use_composite:
         c = df[curv1_col] + df[curv2_col]
@@ -319,3 +327,49 @@ def generate_all_signals(
     )
     
     return signals
+
+
+def map_curve_forecast_to_spread_signal(
+    y_pred: np.ndarray,
+    y_origin: np.ndarray,
+    tenor_cols: List[str],
+    train_spread_std: float,
+    strategy_type: str = "2s10s",
+) -> Union[float, np.ndarray]:
+    """
+    Map forecasted yield curve into predicted observable spread change and signed RV allocation.
+    
+    RESEARCH INTEGRITY & SIGN VERIFICATION (Prompt 5):
+    - Observables are computed directly from curve loadings: y_hat = Lambda * F_hat.
+    - 2s10s Spread: S = y(10Y) - y(2Y).
+      Predicted spread change Delta S_hat = S_hat - S_origin.
+      Delta S_hat > 0 -> Curve steepens -> Signal > 0 (Steepener: Long ZT, Short ZN).
+      Delta S_hat < 0 -> Curve flattens -> Signal < 0 (Flattener: Short ZT, Long ZN).
+    - 2s5s10s Fly: B = 2*y(5Y) - y(2Y) - y(10Y).
+      Predicted fly change Delta B_hat = B_hat - B_origin.
+      Delta B_hat > 0 -> Belly cheapens (yield rises) -> Signal > 0 (Short Belly ZF, Long Wings ZT/ZN).
+      Delta B_hat < 0 -> Belly richens (yield falls) -> Signal < 0 (Long Belly ZF, Short Wings ZT/ZN).
+    """
+    is_1d = (y_pred.ndim == 1)
+    yp = y_pred.reshape(1, -1) if is_1d else y_pred
+    yo = y_origin.reshape(1, -1) if y_origin.ndim == 1 else y_origin
+    scale = max(1e-4, train_spread_std)
+    
+    sp_pred = compute_observable_spreads(yp, tenor_cols)
+    sp_orig = compute_observable_spreads(yo, tenor_cols)
+    
+    if strategy_type == "2s10s":
+        if "2s10s" in sp_pred and "2s10s" in sp_orig:
+            delta_s = sp_pred["2s10s"] - sp_orig["2s10s"]
+            sig = np.clip(delta_s / scale, -1.0, 1.0)
+            return float(sig[0]) if is_1d else sig
+        return 0.0 if is_1d else np.zeros(len(yp))
+    elif strategy_type in ("2s5s10s", "fly"):
+        if "2s5s10s" in sp_pred and "2s5s10s" in sp_orig:
+            delta_b = sp_pred["2s5s10s"] - sp_orig["2s5s10s"]
+            sig = np.clip(delta_b / scale, -1.0, 1.0)
+            return float(sig[0]) if is_1d else sig
+        return 0.0 if is_1d else np.zeros(len(yp))
+    else:
+        raise ValueError(f"Unknown strategy_type: {strategy_type}")
+

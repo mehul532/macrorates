@@ -43,9 +43,17 @@ def allocate_2s10s_spread(
     """
     Allocate DV01-neutral 2s10s curve position.
     
-    Signal > 0 -> Steepener (Long 2Y ZT, Short 10Y ZN)
-    Signal < 0 -> Flattener (Short 2Y ZT, Long 10Y ZN)
-    Signal == 0 -> Flat (0 contracts)
+    SIGN CONVENTION & PROFIT VERIFICATION (Prompt 5):
+    - Observable 2s10s Spread: S = y(10Y) - y(2Y).
+    - Signal > 0 -> Steepener (Long 2Y ZT, Short 10Y ZN):
+        Profits when spread widens / steepens (S increases):
+        * If 10Y yield rises, Short ZN gains from falling 10Y bond price.
+        * If 2Y yield falls, Long ZT gains from rising 2Y bond price.
+    - Signal < 0 -> Flattener (Short 2Y ZT, Long 10Y ZN):
+        Profits when spread narrows / flattens (S decreases):
+        * If 2Y yield rises, Short ZT gains from falling 2Y bond price.
+        * If 10Y yield falls, Long ZN gains from rising 10Y bond price.
+    - Signal == 0 -> Flat (0 contracts).
     
     Residual portfolio DV01 tolerance strictly enforced < 5% of single leg total DV01.
     """
@@ -109,14 +117,19 @@ def allocate_2s5s10s_butterfly(
     """
     Allocate DV01-neutral 2s-5s-10s butterfly position via integer lattice optimization.
     
-    Wings: ZT (2Y), ZN (10Y). Belly: ZF (5Y).
-    50/50 DV01 weighting across wings:
-    N_ZT * DV01_ZT ~= 0.5 * |N_ZF| * DV01_ZF
-    N_ZN * DV01_ZN ~= 0.5 * |N_ZF| * DV01_ZF
-    
-    Signal > 0 -> Long Fly (Short Belly ZF, Long Wings ZT & ZN)
-    Signal < 0 -> Short Fly (Long Belly ZF, Short Wings ZT & ZN)
-    Signal == 0 or scaled_target < min_trade_dv01 -> Flat (0 contracts)
+    SIGN CONVENTION & PROFIT VERIFICATION (Prompt 5):
+    - Observable Curvature: B = 2*y(5Y) - y(2Y) - y(10Y).
+    - Wings: ZT (2Y), ZN (10Y). Belly: ZF (5Y).
+    - 50/50 DV01 weighting across wings:
+        N_ZT * DV01_ZT ~= 0.5 * |N_ZF| * DV01_ZF
+        N_ZN * DV01_ZN ~= 0.5 * |N_ZF| * DV01_ZF
+    - Signal > 0 -> Long Fly (Short Belly ZF, Long Wings ZT & ZN):
+        Profits when belly yield rises relative to wings (belly cheapens, B widens):
+        * Short ZF gains from falling 5Y bond price.
+    - Signal < 0 -> Short Fly (Long Belly ZF, Short Wings ZT & ZN):
+        Profits when belly yield falls relative to wings (belly richens, B narrows):
+        * Long ZF gains from rising 5Y bond price.
+    - Signal == 0 or scaled_target < min_trade_dv01 -> Flat (0 contracts).
     """
     scaled_target = target_dv01 * abs(signal)
     if abs(signal) < 1e-4 or scaled_target < min_trade_dv01:

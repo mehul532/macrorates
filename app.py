@@ -210,7 +210,9 @@ def render_explorer():
     event = event_rows.iloc[0]
     actual_val = event["actual"]
     consensus_val = event["forecast"]
-    surprise_val = event["surprise_ann"] if pd.notna(event["surprise_ann"]) else event["surprise_model"]
+    is_ann = pd.notna(event.get("surprise_ann", np.nan))
+    surprise_val = event["surprise_ann"] if is_ann else event["surprise_model"]
+    surp_type_label = "Announcement Surprise (S_ann)" if is_ann else "Statistical Innovation (S_model)"
     unit = event.get("unit", "")
     
     col1, col2, col3, col4 = st.columns(4)
@@ -226,7 +228,7 @@ def render_explorer():
         surp_str = f"{surprise_val:+.2f}σ" if pd.notna(surprise_val) else "0.00σ"
         badge_cls = "badge-hawkish" if surprise_val > 0 else "badge-dovish"
         nature = "Hawkish / Hot" if surprise_val > 0 else "Dovish / Cool"
-        st.markdown(f'<div class="metric-card"><div class="metric-title">Standardized Surprise (S_ann)</div><div class="metric-value">{surp_str} <span class="{badge_cls}">{nature}</span></div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-title">{surp_type_label}</div><div class="metric-value">{surp_str} <span class="{badge_cls}">{nature}</span></div></div>', unsafe_allow_html=True)
 
     # 2. STEP 2: TREASURY CURVE & 3. STEP 3: LATENT FACTORS
     col_left, col_right = st.columns([1.35, 1.0])
@@ -251,6 +253,7 @@ def render_explorer():
 
     with col_left:
         st.markdown('<div class="step-banner">STEP 2: TREASURY TERM STRUCTURE (BEFORE VS. AFTER)</div>', unsafe_allow_html=True)
+        st.caption("Data Source: U.S. Treasury Constant Maturity par yields (indicative bid quotes released post-close ~4:00 PM ET).")
         
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 6.2), gridspec_kw={'height_ratios': [2.2, 1.0]}, sharex=True)
         
@@ -283,6 +286,7 @@ def render_explorer():
 
     with col_right:
         st.markdown('<div class="step-banner">STEP 3: DYNAMIC LATENT FACTOR INNOVATIONS</div>', unsafe_allow_html=True)
+        st.caption("Factor Provenance: Filtered state innovations from Dynamic Nelson-Siegel Kalman filter (Filtered != Tradable).")
         
         if dt_curr in factor_df.index and dt_prev in factor_df.index:
             dL = (factor_df.loc[dt_curr, "kf_level"] - factor_df.loc[dt_prev, "kf_level"]) * 100.0
@@ -307,17 +311,12 @@ def render_explorer():
         else:
             shape_desc = "Belly Cheapening (2Y-5Y Underperforms)" if dC > 0 else "Belly Richening (Wings Underperform)"
             
-        st.info(f"**Term Structure Diagnosis**: **{shape_desc}**. Consistent with Milestone 4 empirical event-study impulse response.")
+        st.info(f"**Term Structure Diagnosis**: **{shape_desc}**. Consistent with empirical event-study impulse response.")
 
-        # 4. STEP 4: RETROSPECTIVE EVENT TRADE DIAGNOSTIC
-        st.markdown('<div class="step-banner">STEP 4: RETROSPECTIVE EVENT SHOCK TRADE (SYNTHETIC PROXY)</div>', unsafe_allow_html=True)
-        st.warning(
-            "⚠️ **RESEARCH INTEGRITY DISCLOSURE**: This relative-value trade is an illustrative retrospective diagnostic "
-            "evaluating how the observed announcement surprise projects onto a DV01-neutral structure. "
-            "It is NOT an achieved or executable live trading result."
-        )
+        # 4. STEP 4: RELATIVE-VALUE POSITIONING & SIGN VERIFICATION
+        st.markdown('<div class="step-banner">STEP 4: SYSTEMATIC RELATIVE-VALUE ALLOCATION</div>', unsafe_allow_html=True)
         
-        # Decide trade based on event nature
+        # Decide trade based on event nature and verified signs (Prompt 5)
         if selected_indicator in ("CPI", "CORE_CPI") and abs(dC) > 2.0:
             # Curvature trade: Butterfly
             sig = 1.0 if surprise_val > 0 else -1.0
@@ -325,8 +324,8 @@ def render_explorer():
             strategy_name = "2s-5s-10s DV01-Neutral Butterfly"
             position_desc = f"{trade['n_zt']:+d} ZT (2Y)  |  {trade['n_zf']:+d} ZF (5Y)  |  {trade['n_zn']:+d} ZN (10Y)"
         else:
-            # Slope trade: 2s10s spread
-            sig = -1.0 if surprise_val > 0 else 1.0  # Hawkish -> Flattener (-1)
+            # Slope trade: 2s10s spread (Hawkish -> Flattener [-1], Dovish -> Steepener [+1])
+            sig = -1.0 if surprise_val > 0 else 1.0
             trade = allocate_2s10s_spread(signal=sig, target_dv01=target_dv01)
             strategy_name = "2s10s DV01-Neutral Curve Spread"
             position_desc = f"{trade['n_zt']:+d} ZT (2Y)  |  {trade['n_zn']:+d} ZN (10Y)"
@@ -341,36 +340,58 @@ def render_explorer():
             f"**[CONFIRMED NEUTRAL ✅]**"
         )
 
-        # 5. STEP 5: RETROSPECTIVE P&L ATTRIBUTION
-        st.markdown('<div class="step-banner">STEP 5: RETROSPECTIVE EVENT P&L ATTRIBUTION (ILLUSTRATIVE)</div>', unsafe_allow_html=True)
-        st.caption("Note: P&L is calculated retrospectively from the same-day CMT yield shift to illustrate how the curve move would project onto DV01 weights. This is not an executed fill.")
+        # 5. STEP 5: P&L ATTRIBUTION (CAUSAL EXECUTION VS RETROSPECTIVE SHOCK)
+        st.markdown('<div class="step-banner">STEP 5: P&L ATTRIBUTION & TIMING CONTRACT</div>', unsafe_allow_html=True)
         
-        # Calculate daily gross pnl
-        zt_dpnl = -DEFAULT_FUTURES_DV01["ZT"] * dy_bp[4]  # 2Y
-        zf_dpnl = -DEFAULT_FUTURES_DV01["ZF"] * dy_bp[6]  # 5Y
-        zn_dpnl = -DEFAULT_FUTURES_DV01["ZN"] * dy_bp[8]  # 10Y
+        tab_causal, tab_retrospective = st.tabs(["Causal Forward Execution (t → t+1)", "Retrospective Shock Illustration (Diagnostic)"])
         
-        gross_pnl = trade.get("n_zt", 0) * zt_dpnl + trade.get("n_zf", 0) * zf_dpnl + trade.get("n_zn", 0) * zn_dpnl
         total_contracts = abs(trade.get("n_zt", 0)) + abs(trade.get("n_zf", 0)) + abs(trade.get("n_zn", 0))
-        
-        # Costs (V1 model)
-        slippage_cost = total_contracts * 0.5 * 15.625
-        fee_cost = total_contracts * 1.50
-        cash_interest = (target_dv01 * 100.0) * (0.02 / 252.0)
-        net_pnl = gross_pnl - slippage_cost - fee_cost + cash_interest
+        entry_fee = total_contracts * 1.50
+        entry_slippage = total_contracts * 0.5 * 15.625
+        entry_trade_cost = entry_fee + entry_slippage
+        cash_interest_day = (target_dv01 * 100.0) * (0.02 / 360.0)
 
-        pnl_df = pd.DataFrame([
-            {"Component": "Gross Curve Movement", "P&L ($)": round(gross_pnl, 2)},
-            {"Component": "Bid/Ask Crossing Slippage", "P&L ($)": -round(slippage_cost, 2)},
-            {"Component": "Exchange Clearing Fees", "P&L ($)": -round(fee_cost, 2)},
-            {"Component": "Cash Collateral Interest", "P&L ($)": round(cash_interest, 2)},
-            {"Component": "NET EVENT P&L", "P&L ($)": round(net_pnl, 2)},
-        ])
-        
-        st.dataframe(pnl_df, use_container_width=True, hide_index=True)
-        
-        pnl_color = "#16A34A" if net_pnl >= 0 else "#DC2626"
-        st.markdown(f'<div style="text-align: right; font-size: 1.1rem; font-weight: 700; color: {pnl_color};">Net Return on Event: ${net_pnl:+,.2f}</div>', unsafe_allow_html=True)
+        with tab_causal:
+            st.caption("Execution Contract: Trade entered at Event Close t (after release & post-close CMT publication). Held forward to next close t+1.")
+            if curr_idx + 1 < len(yield_df):
+                dt_next = yield_df.index[curr_idx + 1]
+                y_next = yield_df.loc[dt_next, TENOR_COLS].values
+                dy_fwd_bp = (y_next - y_curr) * 100.0
+                
+                zt_fwd_pnl = -DEFAULT_FUTURES_DV01["ZT"] * dy_fwd_bp[4]
+                zf_fwd_pnl = -DEFAULT_FUTURES_DV01["ZF"] * dy_fwd_bp[6]
+                zn_fwd_pnl = -DEFAULT_FUTURES_DV01["ZN"] * dy_fwd_bp[8]
+                gross_fwd_pnl = trade.get("n_zt", 0) * zt_fwd_pnl + trade.get("n_zf", 0) * zf_fwd_pnl + trade.get("n_zn", 0) * zn_fwd_pnl
+                net_fwd_pnl = gross_fwd_pnl - entry_trade_cost + cash_interest_day
+                
+                fwd_df = pd.DataFrame([
+                    {"Component": f"Gross Holding Move ({dt_curr.strftime('%b %d')} → {dt_next.strftime('%b %d')})", "P&L ($)": round(gross_fwd_pnl, 2)},
+                    {"Component": "Initial Entry Execution Costs (Fees + Slippage)", "P&L ($)": -round(entry_trade_cost, 2)},
+                    {"Component": "Cash Collateral Interest", "P&L ($)": round(cash_interest_day, 2)},
+                    {"Component": "NET CAUSAL FORWARD P&L", "P&L ($)": round(net_fwd_pnl, 2)},
+                ])
+                st.dataframe(fwd_df, use_container_width=True, hide_index=True)
+                pnl_col = "#16A34A" if net_fwd_pnl >= 0 else "#DC2626"
+                st.markdown(f'<div style="text-align: right; font-size: 1.05rem; font-weight: 700; color: {pnl_col};">Net Causal Return (t → t+1): ${net_fwd_pnl:+,.2f}</div>', unsafe_allow_html=True)
+            else:
+                st.info("Event is the latest observation; forward t+1 yield not yet observed.")
+
+        with tab_retrospective:
+            st.warning("⚠️ Retrospective Diagnostic: Illustrates how the event-day CMT yield shift would project onto DV01 weights. This cannot be captured live without lookahead.")
+            zt_dpnl = -DEFAULT_FUTURES_DV01["ZT"] * dy_bp[4]
+            zf_dpnl = -DEFAULT_FUTURES_DV01["ZF"] * dy_bp[6]
+            zn_dpnl = -DEFAULT_FUTURES_DV01["ZN"] * dy_bp[8]
+            gross_retro = trade.get("n_zt", 0) * zt_dpnl + trade.get("n_zf", 0) * zf_dpnl + trade.get("n_zn", 0) * zn_dpnl
+            net_retro = gross_retro - entry_trade_cost + cash_interest_day
+
+            retro_df = pd.DataFrame([
+                {"Component": "Retrospective Event Move (Before vs. After Close)", "P&L ($)": round(gross_retro, 2)},
+                {"Component": "Illustrative Entry Costs", "P&L ($)": -round(entry_trade_cost, 2)},
+                {"Component": "Cash Collateral Interest", "P&L ($)": round(cash_interest_day, 2)},
+                {"Component": "NET RETROSPECTIVE SHOCK P&L", "P&L ($)": round(net_retro, 2)},
+            ])
+            st.dataframe(retro_df, use_container_width=True, hide_index=True)
+
 
 
 if __name__ == "__main__":

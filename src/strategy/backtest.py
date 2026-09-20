@@ -34,6 +34,94 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class TradeRecord:
+    """Detailed record of an executed trade for audit and ledger accounting."""
+    timestamp: pd.Timestamp
+    symbol: str
+    direction: str       # "BUY" or "SELL"
+    quantity: int        # Number of contracts traded (positive int)
+    price_points: float  # Price in points / ticks
+    fee: float           # Exchange and clearing fees ($)
+    slippage: float      # Half-tick crossing slippage ($)
+    trade_type: str      # "ENTRY", "REBALANCE", "ROLL", "LIQUIDATION"
+
+    @property
+    def total_cost(self) -> float:
+        return self.fee + self.slippage
+
+
+class TradeLedger:
+    """
+    Formal trade accounting ledger tracking all executed fills, fees, slippage, and roll events.
+    
+    RESEARCH INTEGRITY CONTRACT (Prompt 5):
+    - Turnover is derived strictly from contract quantities only (excluding signal/net_dv01 columns).
+    - Initial entry costs from zero inventory are explicitly recorded.
+    - Contract rolls are recorded as explicit single events per quarterly cycle.
+    - Cash-ledger identity: final equity - initial capital == total collateral P&L.
+    """
+    def __init__(self):
+        self.trades: List[TradeRecord] = []
+        self.roll_events: List[Dict[str, Any]] = []
+
+    def add_trade(self, trade: TradeRecord):
+        self.trades.append(trade)
+
+    def add_roll_event(
+        self,
+        timestamp: pd.Timestamp,
+        symbol: str,
+        contracts: int,
+        friction_per_contract: float,
+        total_cost: float,
+    ):
+        self.roll_events.append({
+            "timestamp": timestamp,
+            "symbol": symbol,
+            "contracts": contracts,
+            "friction_per_contract": friction_per_contract,
+            "total_cost": total_cost,
+        })
+
+    def total_contract_turnover(self) -> int:
+        """Derive total contracts traded strictly from contract trades."""
+        return sum(t.quantity for t in self.trades)
+
+    def total_trade_fees(self) -> float:
+        return sum(t.fee for t in self.trades)
+
+    def total_slippage(self) -> float:
+        return sum(t.slippage for t in self.trades)
+
+    def total_trade_costs(self) -> float:
+        return sum(t.total_cost for t in self.trades)
+
+    def total_roll_costs(self) -> float:
+        return sum(r["total_cost"] for r in self.roll_events)
+
+
+def compute_proxy_roll_dates(dates: pd.DatetimeIndex) -> List[pd.Timestamp]:
+    """
+    Compute exactly one scheduled roll date per quarterly contract cycle.
+    
+    DOCUMENTED PROXY SCHEDULE (Prompt 5):
+    Quarterly Treasury futures (ZT, ZF, ZN, TN, UB) follow IMM cycles:
+    March (H), June (M), September (U), December (Z).
+    Roll friction is charged once per cycle in February, May, August, November.
+    For each cycle month, the roll occurs on the FIRST trading day on or after day 20.
+    This replaces repeated day-20-27 charges with exactly ONE roll event per cycle.
+    """
+    roll_dates = []
+    dt_series = pd.Series(dates, index=dates)
+    for (year, month), grp in dt_series.groupby([dates.year, dates.month]):
+        if month in (2, 5, 8, 11):
+            candidates = grp[grp.dt.day >= 20]
+            if not candidates.empty:
+                roll_dates.append(candidates.iloc[0])
+    return roll_dates
+
+
+@dataclass
 class CostModelV1Config:
     """Institutional V1 Cost Model Configuration."""
     # Transaction & Clearing fees per contract traded ($)
@@ -56,6 +144,10 @@ class CostModelV1Config:
     margin_cushion_factor: float = 3.0
     # CRITICAL RULE: Must be False in V1
     deduct_repo_carry: bool = False
+    # Day-count convention for unencumbered cash interest ("act_360" or "bus_252")
+    day_count_convention: str = "act_360"
+    # Configured final liquidation at end of backtest
+    liquidate_at_end: bool = False
 
 
 @dataclass
@@ -67,6 +159,7 @@ class BacktestResult:
     positions: pd.DataFrame
     pnl_components: pd.DataFrame
     metrics: Dict[str, Any]
+    trade_ledger: Optional[TradeLedger] = None
 
 
 class SyntheticDV01Backtest:
@@ -150,10 +243,14 @@ class SyntheticDV01Backtest:
         roll_dates: Optional[List[pd.Timestamp]] = None,
     ) -> BacktestResult:
         """
-        Simulate historical strategy performance under V1 cost model.
+        Simulate historical strategy performance under V1 cost model with formal trade-ledger accounting.
         
-        positions_df: DataFrame containing integer contract allocations:
-                      ['n_zt', 'n_zn'] for 2s10s or ['n_zt', 'n_zf', 'n_zn'] for fly
+        RESEARCH INTEGRITY & CASH ACCOUNTING (Prompt 5):
+        - Fills and initial entry from zero inventory are charged explicitly.
+        - Quarterly rolls occur once per cycle on documented proxy schedule.
+        - Unencumbered cash earns short rate with documented day-count convention.
+        - Trade ledger derives costs and turnover counting contract quantities only.
+        - Cash ledger identity: final equity - initial capital == total collateral P&L.
         """
         if dv01_dict is None:
             dv01_dict = DEFAULT_FUTURES_DV01
@@ -185,27 +282,62 @@ class SyntheticDV01Backtest:
         else:
             r_cash = pd.Series(0.02, index=common_dates)
             
-        # Detect quarterly roll dates if not provided
+        # One scheduled roll date per contract cycle under documented proxy schedule
         if roll_dates is None:
-            # End of Feb, May, Aug, Nov (approx 5 days prior to IMM First Notice Day)
-            roll_dates = [
-                dt for dt in common_dates
-                if dt.month in (2, 5, 8, 11) and dt.day >= 20 and dt.day <= 27
-            ]
+            roll_dates = compute_proxy_roll_dates(common_dates)
         roll_set = set(pd.to_datetime(roll_dates))
         
-        # Time-stepping simulation
+        trade_ledger = TradeLedger()
         n_days = len(common_dates)
         equity = np.zeros(n_days)
         gross_pnl = np.zeros(n_days)
         trade_cost = np.zeros(n_days)
         roll_cost = np.zeros(n_days)
         cash_interest = np.zeros(n_days)
+        net_trading_pnl = np.zeros(n_days)
         net_pnl = np.zeros(n_days)
         margin_req = np.zeros(n_days)
         
-        equity[0] = self.initial_capital
-        
+        # -------------------------------------------------------------------
+        # Day 0: Initial entry from zero inventory
+        # -------------------------------------------------------------------
+        t0 = common_dates[0]
+        initial_entry_cost = 0.0
+        for sym in active_syms:
+            pos_0 = int(positions.loc[t0, f"n_{sym.lower()}"])
+            q0 = abs(pos_0)
+            if q0 > 0:
+                spec = TREASURY_FUTURES_SPECS.get(sym)
+                tick_val = spec.tick_value if spec else 15.625
+                slip = self.cost_config.slippage_ticks * tick_val * q0
+                fee = self.cost_config.fee_per_contract * q0
+                tot = fee + slip
+                initial_entry_cost += tot
+                trade_ledger.add_trade(TradeRecord(
+                    timestamp=t0,
+                    symbol=sym,
+                    direction="BUY" if pos_0 > 0 else "SELL",
+                    quantity=q0,
+                    price_points=0.0,
+                    fee=fee,
+                    slippage=slip,
+                    trade_type="ENTRY",
+                ))
+
+        trade_cost[0] = initial_entry_cost
+        equity[0] = self.initial_capital - initial_entry_cost
+        net_trading_pnl[0] = -initial_entry_cost
+        net_pnl[0] = -initial_entry_cost
+
+        raw_margin_0 = sum(
+            abs(positions.loc[t0, f"n_{sym.lower()}"]) * self.cost_config.initial_margin.get(sym, 2000.0)
+            for sym in active_syms
+        )
+        margin_req[0] = raw_margin_0 * (1.0 - self.cost_config.spread_margin_credit)
+
+        # -------------------------------------------------------------------
+        # Days 1 .. n_days - 1: Sequential simulation
+        # -------------------------------------------------------------------
         for t in range(1, n_days):
             dt = common_dates[t]
             dt_prev = common_dates[t - 1]
@@ -218,30 +350,52 @@ class SyntheticDV01Backtest:
                 daily_gross += pos_prev * unit_pnl
             gross_pnl[t] = daily_gross
             
-            # 2. Transaction Costs & Bid/Ask Slippage on position changes at t
+            # 2. Transaction Costs & Bid/Ask Slippage on rebalances at t
             daily_trade_cost = 0.0
-            total_contracts_held = 0.0
+            total_contracts_held = 0
             for sym in active_syms:
-                pos_prev = positions.loc[dt_prev, f"n_{sym.lower()}"]
-                pos_curr = positions.loc[dt, f"n_{sym.lower()}"]
+                pos_prev = int(positions.loc[dt_prev, f"n_{sym.lower()}"])
+                pos_curr = int(positions.loc[dt, f"n_{sym.lower()}"])
                 delta_pos = abs(pos_curr - pos_prev)
                 total_contracts_held += abs(pos_curr)
                 
                 if delta_pos > 0:
                     spec = TREASURY_FUTURES_SPECS.get(sym)
                     tick_val = spec.tick_value if spec else 15.625
-                    slippage = self.cost_config.slippage_ticks * tick_val
-                    daily_trade_cost += delta_pos * (self.cost_config.fee_per_contract + slippage)
+                    slip = self.cost_config.slippage_ticks * tick_val * delta_pos
+                    fee = self.cost_config.fee_per_contract * delta_pos
+                    tot = fee + slip
+                    daily_trade_cost += tot
+                    trade_ledger.add_trade(TradeRecord(
+                        timestamp=dt,
+                        symbol=sym,
+                        direction="BUY" if pos_curr > pos_prev else "SELL",
+                        quantity=delta_pos,
+                        price_points=0.0,
+                        fee=fee,
+                        slippage=slip,
+                        trade_type="REBALANCE",
+                    ))
             trade_cost[t] = daily_trade_cost
             
-            # 3. Contract Roll Drag
+            # 3. Contract Roll Drag (Single roll event per cycle on documented proxy schedule)
             daily_roll_cost = 0.0
             if dt in roll_set and total_contracts_held > 0:
-                daily_roll_cost = total_contracts_held * self.cost_config.roll_friction_per_contract
+                for sym in active_syms:
+                    n_held = abs(int(positions.loc[dt, f"n_{sym.lower()}"]))
+                    if n_held > 0:
+                        c_roll = n_held * self.cost_config.roll_friction_per_contract
+                        daily_roll_cost += c_roll
+                        trade_ledger.add_roll_event(
+                            timestamp=dt,
+                            symbol=sym,
+                            contracts=n_held,
+                            friction_per_contract=self.cost_config.roll_friction_per_contract,
+                            total_cost=c_roll,
+                        )
             roll_cost[t] = daily_roll_cost
             
             # 4. Margin Requirement & Cash Interest (NO repo carry!)
-            # Gross initial margin discounted by spread credit
             raw_margin = sum(
                 abs(positions.loc[dt, f"n_{sym.lower()}"]) * self.cost_config.initial_margin.get(sym, 2000.0)
                 for sym in active_syms
@@ -250,14 +404,50 @@ class SyntheticDV01Backtest:
             margin_req[t] = margin
             
             # Unencumbered cash earns risk-free rate
-            unencumbered_cash = max(0.0, equity[t - 1] - margin)
-            daily_interest = unencumbered_cash * (r_cash.iloc[t] / 252.0)
+            unencumbered_cash = max(0.0, equity[t - 1] - margin_req[t - 1])
+            days_elapsed = max(1, (dt - dt_prev).days)
+            if self.cost_config.day_count_convention == "act_360":
+                daily_interest = unencumbered_cash * r_cash.iloc[t - 1] * (days_elapsed / 360.0)
+            else:
+                daily_interest = unencumbered_cash * (r_cash.iloc[t - 1] / 252.0)
             cash_interest[t] = daily_interest
             
-            # Net P&L
-            day_net = daily_gross - daily_trade_cost - daily_roll_cost + daily_interest
+            # Net Trading P&L (strictly excluding cash interest)
+            day_net_trading = daily_gross - daily_trade_cost - daily_roll_cost
+            net_trading_pnl[t] = day_net_trading
+
+            # Net P&L (Total Collateral P&L)
+            day_net = day_net_trading + daily_interest
             net_pnl[t] = day_net
             equity[t] = equity[t - 1] + day_net
+
+        # Final liquidation if configured
+        if self.cost_config.liquidate_at_end:
+            final_dt = common_dates[-1]
+            liq_cost = 0.0
+            for sym in active_syms:
+                pos_end = abs(int(positions.loc[final_dt, f"n_{sym.lower()}"]))
+                if pos_end > 0:
+                    spec = TREASURY_FUTURES_SPECS.get(sym)
+                    tick_val = spec.tick_value if spec else 15.625
+                    slip = self.cost_config.slippage_ticks * tick_val * pos_end
+                    fee = self.cost_config.fee_per_contract * pos_end
+                    tot = fee + slip
+                    liq_cost += tot
+                    trade_ledger.add_trade(TradeRecord(
+                        timestamp=final_dt,
+                        symbol=sym,
+                        direction="SELL" if positions.loc[final_dt, f"n_{sym.lower()}"] > 0 else "BUY",
+                        quantity=pos_end,
+                        price_points=0.0,
+                        fee=fee,
+                        slippage=slip,
+                        trade_type="LIQUIDATION",
+                    ))
+            trade_cost[-1] += liq_cost
+            net_trading_pnl[-1] -= liq_cost
+            net_pnl[-1] -= liq_cost
+            equity[-1] -= liq_cost
             
         equity_series = pd.Series(equity, index=common_dates)
         daily_returns = equity_series.pct_change().fillna(0.0)
@@ -266,13 +456,14 @@ class SyntheticDV01Backtest:
             "gross_pnl": gross_pnl,
             "trade_cost": trade_cost,
             "roll_cost": roll_cost,
+            "net_trading_pnl": net_trading_pnl,
             "cash_interest": cash_interest,
             "net_pnl": net_pnl,
             "equity": equity,
             "margin_req": margin_req,
         }, index=common_dates)
         
-        metrics = self._calculate_metrics(daily_returns, equity_series, pnl_df)
+        metrics = self._calculate_metrics(daily_returns, equity_series, pnl_df, trade_ledger)
         
         return BacktestResult(
             strategy_name=strategy_name,
@@ -281,6 +472,7 @@ class SyntheticDV01Backtest:
             positions=positions,
             pnl_components=pnl_df,
             metrics=metrics,
+            trade_ledger=trade_ledger,
         )
 
     def _calculate_metrics(
@@ -288,8 +480,9 @@ class SyntheticDV01Backtest:
         returns: pd.Series,
         equity: pd.Series,
         pnl_df: pd.DataFrame,
+        trade_ledger: Optional[TradeLedger] = None,
     ) -> Dict[str, Any]:
-        """Compute institutional risk-adjusted return scorecard."""
+        """Compute institutional risk-adjusted return scorecard with unbundled components."""
         n_days = len(returns)
         if n_days <= 1:
             return {}
@@ -297,49 +490,77 @@ class SyntheticDV01Backtest:
         years = max(0.01, n_days / 252.0)
         total_return = (equity.iloc[-1] / equity.iloc[0]) - 1.0
         cagr = (1.0 + total_return) ** (1.0 / years) - 1.0 if total_return > -1.0 else -1.0
-        ann_vol = float(returns.std() * np.sqrt(252.0))
         
-        # Sharpe Ratio (annualized)
-        mean_daily_ret = float(returns.mean())
-        sharpe = (mean_daily_ret * np.sqrt(252.0)) / (returns.std() + 1e-8) if ann_vol > 0 else 0.0
-        
-        # Sortino Ratio (downside risk)
-        downside_returns = returns[returns < 0.0]
-        downside_std = float(downside_returns.std() * np.sqrt(252.0)) if len(downside_returns) > 0 else 1e-8
-        sortino = (mean_daily_ret * np.sqrt(252.0)) / (downside_std + 1e-8)
-        
+        # PnL unbundled breakdowns
+        total_gross = float(pnl_df["gross_pnl"].sum())
+        total_trade_costs = float(pnl_df["trade_cost"].sum())
+        total_roll_costs = float(pnl_df["roll_cost"].sum())
+        total_net_trading = float(pnl_df["net_trading_pnl"].sum())
+        total_interest = float(pnl_df["cash_interest"].sum())
+        total_collateral_pnl = float(pnl_df["net_pnl"].sum())
+        final_equity = float(equity.iloc[-1])
+
+        # Cash ledger identity verification
+        ledger_diff = abs((final_equity - self.initial_capital) - total_collateral_pnl)
+        assert ledger_diff < 1e-4, f"Cash ledger identity broken: equity diff != net PnL (diff={ledger_diff})"
+
+        # Primary strategy return series: daily net trading P&L / initial_capital
+        daily_trading_ret = pnl_df["net_trading_pnl"] / self.initial_capital
+        trading_vol = float(daily_trading_ret.std() * np.sqrt(252.0))
+        mean_trading_ret = float(daily_trading_ret.mean())
+
+        # Sharpe ratio on net trading return (undefined / NaN when risk is zero)
+        if trading_vol < 1e-10:
+            sharpe = np.nan
+        else:
+            sharpe = round(float((mean_trading_ret * np.sqrt(252.0)) / trading_vol), 3)
+            
+        # Sortino Ratio (coherent downside deviation on net trading return)
+        downside_diff = np.minimum(0.0, daily_trading_ret.values)
+        downside_var = float(np.mean(downside_diff ** 2))
+        downside_std = float(np.sqrt(downside_var) * np.sqrt(252.0))
+        if downside_std < 1e-10:
+            sortino = np.nan
+        else:
+            sortino = round(float((mean_trading_ret * np.sqrt(252.0)) / downside_std), 3)
+            
         # Drawdowns
         running_max = equity.cummax()
         drawdowns = (equity - running_max) / running_max
         max_drawdown = float(drawdowns.min())
-        calmar = cagr / abs(max_drawdown) if abs(max_drawdown) > 1e-4 else 0.0
+        calmar = round(cagr / abs(max_drawdown), 3) if abs(max_drawdown) > 1e-4 else np.nan
         
-        # PnL breakdown
-        total_gross = float(pnl_df["gross_pnl"].sum())
-        total_trade_costs = float(pnl_df["trade_cost"].sum())
-        total_roll_costs = float(pnl_df["roll_cost"].sum())
-        total_interest = float(pnl_df["cash_interest"].sum())
-        total_net = float(pnl_df["net_pnl"].sum())
+        # Contract turnover derived strictly from trade ledger contract quantities
+        total_contracts = trade_ledger.total_contract_turnover() if trade_ledger else 0
+        pnl_turnover = round(total_net_trading / total_contracts, 2) if total_contracts > 0 else np.nan
+
         win_rate = float((returns > 0.0).sum() / max(1, (returns != 0.0).sum()))
         
         return {
             "total_return_pct": round(total_return * 100.0, 2),
             "cagr_pct": round(cagr * 100.0, 2),
-            "annualized_vol_pct": round(ann_vol * 100.0, 2),
-            "sharpe_ratio": round(sharpe, 3),
-            "sortino_ratio": round(sortino, 3),
+            "annualized_vol_pct": round(trading_vol * 100.0, 2),
+            "sharpe_ratio": sharpe,
+            "sortino_ratio": sortino,
             "max_drawdown_pct": round(max_drawdown * 100.0, 2),
-            "calmar_ratio": round(calmar, 3),
+            "calmar_ratio": calmar,
             "win_rate_pct": round(win_rate * 100.0, 2),
+            "contract_turnover_lots": int(total_contracts),
+            "pnl_turnover_usd_per_lot": pnl_turnover,
             "total_gross_pnl_usd": round(total_gross, 2),
             "total_trade_cost_usd": round(total_trade_costs, 2),
             "total_roll_cost_usd": round(total_roll_costs, 2),
+            "total_net_trading_pnl_usd": round(total_net_trading, 2),
             "total_interest_earned_usd": round(total_interest, 2),
-            "total_net_pnl_usd": round(total_net, 2),
+            "total_net_pnl_usd": round(total_collateral_pnl, 2),
+            "total_collateral_pnl_usd": round(total_collateral_pnl, 2),
+            "final_equity_usd": round(final_equity, 2),
+            "cash_ledger_discrepancy_usd": round(ledger_diff, 4),
             "cost_drag_bp_annual": round((total_trade_costs + total_roll_costs) / (self.initial_capital * years) * 10_000.0, 2),
         }
 
 
 # Backwards compatibility alias for SyntheticDV01Backtest
 RelativeValueBacktestEngine = SyntheticDV01Backtest
+
 
