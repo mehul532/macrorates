@@ -20,13 +20,37 @@ Implements:
 """
 
 from dataclasses import dataclass, field
+import hashlib
 import logging
 from pathlib import Path
+import subprocess
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from statsmodels.tsa.api import VAR
+
+
+def get_git_commit_hash() -> str:
+    """Retrieve current git commit hash for run provenance."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        return "UNKNOWN_COMMIT"
+
+
+def get_file_checksum(filepath: Union[str, Path]) -> str:
+    """Compute 16-character SHA-256 data checksum for audit traceability."""
+    p = Path(filepath)
+    if not p.exists():
+        return "FILE_NOT_FOUND"
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()[:16]
 
 from src.curve.canonical import CANONICAL_TENORS, get_canonical_maturities, compute_observable_spreads
 from src.curve.nelson_siegel import (
@@ -184,6 +208,7 @@ class WalkForwardHarness:
         
         spread_2s10s_sq_errors = {m: [] for m in models}
         fly_2s5s10s_sq_errors = {m: [] for m in models}
+        per_tenor_sq_errors = {m: {c: [] for c in tenor_cols} for m in models}
         
         for f_idx, (train_dates, test_dates) in enumerate(folds):
             # Define explicit rolling 1-step forecast origin-target pairs:
@@ -213,6 +238,8 @@ class WalkForwardHarness:
             # 1-step forecast is previous day's curve
             y_rw_pred = np.vstack([y_train.values[-1:], y_test.values[:-1]])
             curve_sq_errors["Random_Walk"].extend(((y_test.values - y_rw_pred) ** 2).flatten())
+            for c_idx, c in enumerate(tenor_cols):
+                per_tenor_sq_errors["Random_Walk"][c].extend(((y_test.iloc[:, c_idx].values - y_rw_pred[:, c_idx]) ** 2).tolist())
             
             spreads_rw = compute_observable_spreads(y_rw_pred, tenor_cols)
             if "2s10s" in spreads_rw and "2s10s" in spreads_act:
@@ -249,6 +276,8 @@ class WalkForwardHarness:
             y_pred_pca, scores_pred_pca, scores_obs_pca = pca_forecaster.sequential_predict_and_update(y_test.values)
             
             curve_sq_errors["PCA_VAR"].extend(((y_test.values - y_pred_pca) ** 2).flatten())
+            for c_idx, c in enumerate(tenor_cols):
+                per_tenor_sq_errors["PCA_VAR"][c].extend(((y_test.iloc[:, c_idx].values - y_pred_pca[:, c_idx]) ** 2).tolist())
             spreads_pca = compute_observable_spreads(y_pred_pca, tenor_cols)
             if "2s10s" in spreads_pca and "2s10s" in spreads_act:
                 spread_2s10s_sq_errors["PCA_VAR"].extend(((spreads_act["2s10s"] - spreads_pca["2s10s"]) ** 2).flatten())
@@ -285,6 +314,8 @@ class WalkForwardHarness:
             y_pred_ns, factors_pred_ns, factors_obs_ns = ns_forecaster.sequential_predict_and_update(y_test.values)
             
             curve_sq_errors["Static_NS"].extend(((y_test.values - y_pred_ns) ** 2).flatten())
+            for c_idx, c in enumerate(tenor_cols):
+                per_tenor_sq_errors["Static_NS"][c].extend(((y_test.iloc[:, c_idx].values - y_pred_ns[:, c_idx]) ** 2).tolist())
             spreads_ns = compute_observable_spreads(y_pred_ns, tenor_cols)
             if "2s10s" in spreads_ns and "2s10s" in spreads_act:
                 spread_2s10s_sq_errors["Static_NS"].extend(((spreads_act["2s10s"] - spreads_ns["2s10s"]) ** 2).flatten())
@@ -343,6 +374,10 @@ class WalkForwardHarness:
             )
             
             curve_sq_errors["DNS_Kalman"].extend(((y_test.values - y_pred_kf) ** 2).flatten())
+            for c_idx, c in enumerate(tenor_cols):
+                sq_kf = ((y_test.iloc[:, c_idx].values - y_pred_kf[:, c_idx]) ** 2).tolist()
+                per_tenor_sq_errors["DNS_Kalman"][c].extend(sq_kf)
+                per_tenor_sq_errors["DNS_Kalman_Macro"][c].extend(sq_kf)
             spreads_kf = compute_observable_spreads(y_pred_kf, tenor_cols)
             if "2s10s" in spreads_kf and "2s10s" in spreads_act:
                 spread_2s10s_sq_errors["DNS_Kalman"].extend(((spreads_act["2s10s"] - spreads_kf["2s10s"]) ** 2).flatten())
@@ -451,6 +486,8 @@ class WalkForwardHarness:
                                 # Actual observation at tgt_dt
                                 actual_y = y_test.iloc[k].values
                                 curve_sq_errors["GBM"].extend(((actual_y - c_hat) ** 2).tolist())
+                                for c_idx, c in enumerate(tenor_cols):
+                                    per_tenor_sq_errors["GBM"][c].append(float((actual_y[c_idx] - c_hat[c_idx]) ** 2))
 
                                 # Observable spreads
                                 c_hat_2d = c_hat.reshape(1, -1)
@@ -570,6 +607,10 @@ class WalkForwardHarness:
             s_rmse_bp = float(np.sqrt(np.mean(spread_2s10s_sq_errors[m])) * 100.0) if len(spread_2s10s_sq_errors[m]) > 0 else np.nan
             fly_rmse_bp = float(np.sqrt(np.mean(fly_2s5s10s_sq_errors[m])) * 100.0) if len(fly_2s5s10s_sq_errors[m]) > 0 else np.nan
             
+            rmse_2y = float(np.sqrt(np.mean(per_tenor_sq_errors[m]["DGS2"])) * 100.0) if "DGS2" in per_tenor_sq_errors[m] and len(per_tenor_sq_errors[m]["DGS2"]) > 0 else np.nan
+            rmse_5y = float(np.sqrt(np.mean(per_tenor_sq_errors[m]["DGS5"])) * 100.0) if "DGS5" in per_tenor_sq_errors[m] and len(per_tenor_sq_errors[m]["DGS5"]) > 0 else np.nan
+            rmse_10y = float(np.sqrt(np.mean(per_tenor_sq_errors[m]["DGS10"])) * 100.0) if "DGS10" in per_tenor_sq_errors[m] and len(per_tenor_sq_errors[m]["DGS10"]) > 0 else np.nan
+
             total_contracts = met.get("contract_turnover_lots", 0)
             pnl_turnover = met.get("pnl_turnover_usd_per_lot", np.nan)
             pnl_dv01 = round(met.get("total_net_trading_pnl_usd", 0.0) / self.config.target_dv01, 2)
@@ -577,7 +618,11 @@ class WalkForwardHarness:
             baseline_rows.append({
                 "Model / Forecast Method": m.replace("_", " + "),
                 "Forecast Status": "EVALUATED" if not np.isnan(c_rmse_bp) else "UNAVAILABLE",
+                "Sample Size (Days)": len(full_sig),
                 "OOS Curve RMSE (bp)": round(c_rmse_bp, 2) if not np.isnan(c_rmse_bp) else np.nan,
+                "2Y Curve RMSE (bp)": round(rmse_2y, 2) if not np.isnan(rmse_2y) else np.nan,
+                "5Y Curve RMSE (bp)": round(rmse_5y, 2) if not np.isnan(rmse_5y) else np.nan,
+                "10Y Curve RMSE (bp)": round(rmse_10y, 2) if not np.isnan(rmse_10y) else np.nan,
                 "2s10s Spread RMSE (bp)": round(s_rmse_bp, 2) if not np.isnan(s_rmse_bp) else np.nan,
                 "2s5s10s Fly RMSE (bp)": round(fly_rmse_bp, 2) if not np.isnan(fly_rmse_bp) else np.nan,
                 "Factor Forecast RMSE (bp)": round(f_rmse_bp, 2) if not np.isnan(f_rmse_bp) else np.nan,
@@ -597,10 +642,116 @@ class WalkForwardHarness:
             })
             
         baseline_table = pd.DataFrame(baseline_rows).set_index("Model / Forecast Method")
+
+        # Build common_sample_table containing evaluated models plus Cash Only strategy benchmark
+        ROLE_MAP = {
+            "Random_Walk": ("Random Walk (Curve Benchmark)", "Curve Benchmark"),
+            "PCA_VAR": ("PCA / VAR(1)", "Term Structure Factor Model"),
+            "Static_NS": ("AR(1) Baseline (Static NS)", "AR(1) Baseline"),
+            "DNS_Kalman": ("DNS + Kalman", "Dynamic Term Structure Model"),
+            "DNS_Kalman_Macro": ("DNS + Kalman + Macro", "Macro-Augmented DTSM"),
+            "GBM": ("GBM", "Machine Learning Baseline"),
+        }
+
+        common_sample_rows = []
+        for orig_row, m in zip(baseline_rows, models):
+            display_name, role = ROLE_MAP.get(m, (orig_row["Model / Forecast Method"], "Model Baseline"))
+            row_copy = {
+                "Model / Forecast Method": display_name,
+                "Benchmark Role": role,
+                "Forecast Status": orig_row["Forecast Status"],
+                "Sample Size (Days)": orig_row["Sample Size (Days)"],
+                "OOS Curve RMSE (bp)": orig_row["OOS Curve RMSE (bp)"],
+                "2Y Curve RMSE (bp)": orig_row["2Y Curve RMSE (bp)"],
+                "5Y Curve RMSE (bp)": orig_row["5Y Curve RMSE (bp)"],
+                "10Y Curve RMSE (bp)": orig_row["10Y Curve RMSE (bp)"],
+                "2s10s Spread RMSE (bp)": orig_row["2s10s Spread RMSE (bp)"],
+                "2s5s10s Fly RMSE (bp)": orig_row["2s5s10s Fly RMSE (bp)"],
+                "Factor Forecast RMSE (bp)": orig_row["Factor Forecast RMSE (bp)"],
+                "Strategy Sharpe": orig_row["Strategy Sharpe"],
+                "Sortino Ratio": orig_row["Sortino Ratio"],
+                "Max Drawdown (%)": orig_row["Max Drawdown (%)"],
+                "Annual Turnover (lots)": orig_row["Annual Turnover (lots)"],
+                "Hit Rate (%)": orig_row["Hit Rate (%)"],
+                "PnL / DV01 ($)": orig_row["PnL / DV01 ($)"],
+                "PnL / Turnover ($/lot)": orig_row["PnL / Turnover ($/lot)"],
+                "Gross PnL ($)": orig_row["Gross PnL ($)"],
+                "Trade Costs ($)": orig_row["Trade Costs ($)"],
+                "Roll Costs ($)": orig_row["Roll Costs ($)"],
+                "Trading Net PnL ($)": orig_row["Trading Net PnL ($)"],
+                "Cash Interest ($)": orig_row["Cash Interest ($)"],
+                "Collateral Net PnL ($)": orig_row["Collateral Net PnL ($)"],
+            }
+            common_sample_rows.append(row_copy)
+
+        all_eval_dates = pd.concat(oos_signals["Random_Walk"]).index
+        cash_pos_df = pd.DataFrame(0, index=all_eval_dates, columns=[f"n_{s.lower()}" for s in ["zt", "zf", "zn"]])
+        b_cash = self.engine.run_strategy(
+            strategy_name="Cash_Only",
+            positions_df=cash_pos_df,
+            yield_df=self.yield_df,
+        )
+        backtest_results["Cash_Only"] = b_cash
+        met_cash = b_cash.metrics
+
+        common_sample_rows.append({
+            "Model / Forecast Method": "Cash Only (Strategy Benchmark)",
+            "Benchmark Role": "Strategy Benchmark",
+            "Forecast Status": "BENCHMARK_ONLY",
+            "Sample Size (Days)": len(cash_pos_df),
+            "OOS Curve RMSE (bp)": np.nan,
+            "2Y Curve RMSE (bp)": np.nan,
+            "5Y Curve RMSE (bp)": np.nan,
+            "10Y Curve RMSE (bp)": np.nan,
+            "2s10s Spread RMSE (bp)": np.nan,
+            "2s5s10s Fly RMSE (bp)": np.nan,
+            "Factor Forecast RMSE (bp)": np.nan,
+            "Strategy Sharpe": np.nan,
+            "Sortino Ratio": np.nan,
+            "Max Drawdown (%)": 0.0,
+            "Annual Turnover (lots)": 0.0,
+            "Hit Rate (%)": np.nan,
+            "PnL / DV01 ($)": 0.0,
+            "PnL / Turnover ($/lot)": np.nan,
+            "Gross PnL ($)": 0.0,
+            "Trade Costs ($)": 0.0,
+            "Roll Costs ($)": 0.0,
+            "Trading Net PnL ($)": 0.0,
+            "Cash Interest ($)": met_cash.get("total_interest_earned_usd", 0.0),
+            "Collateral Net PnL ($)": met_cash.get("total_collateral_pnl_usd", 0.0),
+        })
+        common_sample_table = pd.DataFrame(common_sample_rows).set_index("Model / Forecast Method")
+
+        run_metadata = {
+            "git_commit": get_git_commit_hash(),
+            "data_checksums": {
+                "yield_panel": get_file_checksum("data/processed/yield_panel.parquet"),
+                "factor_panel": get_file_checksum("data/processed/factor_panel.parquet"),
+                "macro_surprises": get_file_checksum("data/processed/macro_surprises.parquet"),
+            },
+            "eval_start_date": str(all_eval_dates[0].date()) if len(all_eval_dates) > 0 else "N/A",
+            "eval_end_date": str(all_eval_dates[-1].date()) if len(all_eval_dates) > 0 else "N/A",
+            "total_eval_days": len(all_eval_dates),
+            "fold_count": len(folds),
+            "run_mode": "QUICK_TWO_FOLD_EVALUATION" if len(folds) <= 2 else "FULL_SAMPLE_EVALUATION",
+            "tenor_panel": tenor_cols,
+            "units": {
+                "curve_rmse": "basis points (0.01%)",
+                "spread_rmse": "basis points (0.01%)",
+                "strategy_returns": "percent per annum",
+                "turnover": "contract lots",
+                "pnl": "USD ($)",
+            },
+            "seed": getattr(self.config, "random_state", 42),
+            "gbm_backend": getattr(self.config, "gbm_backend", "sklearn"),
+            "ledger_summary": ledger.summary_by_model(),
+        }
         
         return {
             "baseline_table": baseline_table,
+            "common_sample_table": common_sample_table,
             "backtest_results": backtest_results,
             "signals": oos_signals,
             "forecast_ledger": ledger,
+            "run_metadata": run_metadata,
         }

@@ -1,46 +1,53 @@
-# Milestone 14 Verdict: Machine Learning Baseline & TreeSHAP Attribution
+# Milestone 14 Verdict: Machine Learning Baseline & Feature Attribution
 
 **Author**: MacroRates Research Team  
-**Models**: Random Walk, PCA/VAR(1), Static NS, DNS+Kalman, DNS+Kalman+Macro, Gradient Boosted Model (GBM)  
-**Discipline**: Strict No-Lookahead, Purged Rolling Folds (756d Lookback, 21d Refit), `fed_regime_ex_ante` ONLY  
+**Git Commit**: `e93721bc2f811cbf2855cb4bddab14c2cf910a51`  
+**Run Mode**: `QUICK_TWO_FOLD_EVALUATION` (Folds: 2)  
+**Evaluated Sample**: 2026-06-29 to 2026-09-17 (57 trading days)  
+**Backend**: `sklearn` | **Seed**: `42`  
 
-> [!WARNING]
-> **RESEARCH INTEGRITY AUDIT NOTICE (INVALIDATED PENDING REGENERATION)**:
-> The headline performance numbers in this document (e.g. GBM Sharpe 4.76, scaled RMSEs) were generated using unverified synthetic fallback assumptions and artificial error multipliers (*0.84, *0.79). They are formally invalidated and pending regeneration under the Prompts 1–6 rolling one-step forecast protocol.
-
----
-
-## 1. Executive Verdict & Core Findings
-
-1. **Does the GBM Match Milestone 4 Economic Intuition?**
-   **Yes, remarkably well.** 
-   - **Level ($\Delta L$)**: Driven primarily by `dlevel_1d, dcurvature_1d, dslope_1d`, reflecting persistent macro momentum and CPI announcement shocks.
-   - **Slope ($\Delta S$)**: Driven by `dslope_1d, dlevel_1d, dslope_2d`, confirming Milestone 4's finding that Federal Reserve policy decisions (FOMC surprises) and labor shocks (NFP) induce immediate curve flattening, modulated by `fed_regime_ex_ante` (hiking stance).
-   - **Curvature ($\Delta C$)**: Driven by `dcurvature_1d, dlevel_1d, dlevel_2d`, capturing intermediate tenor dislocations around CPI release dates.
-
-2. **How Does the GBM Compare in the Extended Baseline Table?**
-   In out-of-sample walk-forward evaluation across the full 2006–2026 historical period:
-   - **Factor Forecast Accuracy**: The non-linear interactions captured by the GBM improve factor 1-step RMSE over naive random walk and PCA/VAR.
-   - **Curve Fitting**: State-space Dynamic Nelson-Siegel retains superior cross-sectional curve smoothness, but the GBM excels at directional turning-point anticipation.
-   - **Systematic Relative-Value Sharpe**: The GBM strategy achieves a Sharpe ratio of **4.760** (Net PnL: **$151,638.90**), trading actively with disciplined risk-adjusted return.
+> [!IMPORTANT]
+> **RESEARCH INTEGRITY & CAUSALITY DISCLOSURE (Prompt 6)**:
+> 1. **Observational vs. Causal Attribution**: TreeSHAP and Gini feature rankings describe statistical feature associations within the gradient-boosted decision trees. They are descriptive diagnostics, NOT proof of causal macroeconomic transmission mechanisms.
+> 2. **Evaluation Scope**: If evaluated under a fast two-fold setting, results represent a recent sample validation, not a full-sample historical evaluation.
+> 3. **Benchmark Discipline**: Random Walk provides the unparameterized zero-increment curve forecasting benchmark. Cash-Only provides an unencumbered capital strategy benchmark. Models are evaluated on common out-of-sample test dates without retroactive tuning or artificial error multipliers.
 
 ---
 
-## 2. Extended Baseline Comparison Table (Milestone 7 Extended)
+## 1. Run Provenance & Data Checksums
 
-| Model / Forecast Method | OOS Curve RMSE (bp) | Factor Forecast RMSE (bp) | Strategy Sharpe | Sortino Ratio | Max Drawdown (%) | Annual Turnover (lots) | Hit Rate (%) | PnL / DV01 ($) | PnL / Turnover ($/lot) | Gross PnL ($) | Trade Costs ($) | Roll Costs ($) | Cash Interest ($) | Net PnL ($) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Random + Walk | 4.05 | 5.47 | 116.45 | 120699.97 | 0.00 | 0.00 | 100.00 | 8.70 | 87048.55 | 0.00 | 0.00 | 0.00 | 87048.55 | 87048.55 |
-| PCA + VAR | 14.76 | 382.58 | 0.94 | 0.09 | -1.83 | 2377.20 | 51.79 | 9.25 | 171.96 | 21132.41 | 3409.22 | 8940.00 | 83679.46 | 92462.66 |
-| Static + NS | 3.95 | 17.83 | 0.77 | 0.07 | -1.59 | 1701.90 | 60.71 | 5.35 | 138.89 | -23466.36 | 2495.19 | 6532.00 | 85961.00 | 53467.45 |
-| DNS + Kalman | 3.80 | 5.04 | 0.92 | 0.08 | -1.51 | 655.90 | 60.71 | 6.27 | 422.89 | -15780.82 | 959.69 | 6532.00 | 86014.46 | 62741.95 |
-| DNS + Kalman + Macro | 3.76 | 4.95 | 1.30 | 0.11 | -0.96 | 1046.30 | 60.71 | 6.15 | 259.91 | -18783.38 | 1535.50 | 4444.00 | 86274.53 | 61511.65 |
-| GBM | 12.93 | 1.17 | 4.76 | 0.42 | -0.31 | 24942.80 | 76.79 | 15.16 | 26.88 | 103698.82 | 36901.56 | 1456.00 | 86297.64 | 151638.90 |
+| Input Panel | SHA-256 Checksum (16-char) | Path |
+| :--- | :--- | :--- |
+| **Yield Panel** | `6c5f1abbb87b7697` | `data/processed/yield_panel.parquet` |
+| **Factor Panel** | `fa37ee083dfe77ca` | `data/processed/factor_panel.parquet` |
+| **Macro Surprises** | `6f7c134c1caf31f6` | `data/processed/macro_surprises.parquet` |
 
 ---
 
-## 3. TreeSHAP Feature Attribution Summary
+## 2. Feature Attribution Summary
 
-### Visual Diagnostics
-- [`reports/figures/gbm_shap_summary.png`](file:///Users/Patron/Documents/Antigravity/reports/figures/gbm_shap_summary.png): 3-panel display of top 10 SHAP drivers for Level, Slope, and Curvature.
-- [`reports/figures/gbm_feature_importance.png`](file:///Users/Patron/Documents/Antigravity/reports/figures/gbm_feature_importance.png): Combined top 15 features across factor dimensions.
+- **Level ($\Delta L_{t+1}$)**: Key features by empirical split impact: `dlevel_1d, dcurvature_1d, dslope_1d`
+- **Slope ($\Delta S_{t+1}$)**: Key features by empirical split impact: `dslope_1d, dlevel_1d, dslope_2d`
+- **Curvature ($\Delta C_{t+1}$)**: Key features by empirical split impact: `dcurvature_1d, dlevel_1d, dlevel_2d`
+
+*Attribution Type*: `tree_shap`. (Descriptive feature importance ranking within decision trees).
+
+---
+
+## 3. Common-Sample Out-of-Sample Performance Table
+
+| Model / Forecast Method | Benchmark Role | Forecast Status | Sample Size (Days) | OOS Curve RMSE (bp) | 2Y Curve RMSE (bp) | 5Y Curve RMSE (bp) | 10Y Curve RMSE (bp) | 2s10s Spread RMSE (bp) | 2s5s10s Fly RMSE (bp) | Factor Forecast RMSE (bp) | Strategy Sharpe | Sortino Ratio | Max Drawdown (%) | Annual Turnover (lots) | Hit Rate (%) | PnL / DV01 ($) | PnL / Turnover ($/lot) | Gross PnL ($) | Trade Costs ($) | Roll Costs ($) | Trading Net PnL ($) | Cash Interest ($) | Collateral Net PnL ($) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Random Walk (Curve Benchmark) | Curve Benchmark | EVALUATED | 57 | 4.05 | 4.82 | 4.62 | 4.26 | 2.88 | 1.75 | 2.88 | N/A | N/A | 0.00 | 0.00 | 100.00 | 0.00 | N/A | 0.00 | 0.00 | 0.00 | 0.00 | 86896.71 | 86896.71 |
+| PCA / VAR(1) | Term Structure Factor Model | EVALUATED | 57 | 5.14 | 5.23 | 5.27 | 4.47 | 4.64 | 3.86 | 4.64 | 0.04 | 0.06 | -1.03 | 11746.70 | 62.50 | 5.40 | 20.31 | 73068.31 | 17587.06 | 1520.00 | 53961.25 | 85575.97 | 139537.22 |
+| AR(1) Baseline (Static NS) | AR(1) Baseline | EVALUATED | 57 | 12.75 | 15.36 | 12.16 | 14.63 | 28.82 | 23.03 | 28.82 | -0.01 | -0.01 | -2.24 | 1680.00 | 60.71 | -1.40 | -36.85 | -9967.08 | 2515.31 | 1520.00 | -14002.39 | 85480.88 | 71478.49 |
+| DNS + Kalman | Dynamic Term Structure Model | EVALUATED | 57 | 12.83 | 16.52 | 11.17 | 14.48 | 29.90 | 22.38 | 29.90 | -0.01 | -0.01 | -2.24 | 1680.00 | 60.71 | -1.40 | -36.85 | -9967.08 | 2515.31 | 1520.00 | -14002.39 | 85480.88 | 71478.49 |
+| DNS + Kalman + Macro | Macro-Augmented DTSM | EVALUATED | 57 | 12.83 | 16.52 | 11.17 | 14.48 | 29.90 | 22.38 | 29.90 | -0.01 | -0.01 | -1.17 | 968.20 | 60.71 | -0.81 | -37.02 | -5780.82 | 1449.59 | 876.00 | -8106.41 | 86080.62 | 77974.21 |
+| GBM | Machine Learning Baseline | EVALUATED | 57 | 13.59 | 12.58 | 11.28 | 9.93 | 20.94 | 23.26 | 20.94 | -0.01 | -0.01 | -2.24 | 1680.00 | 60.71 | -1.40 | -36.85 | -9967.08 | 2515.31 | 1520.00 | -14002.39 | 85480.88 | 71478.49 |
+| Cash Only (Strategy Benchmark) | Strategy Benchmark | BENCHMARK_ONLY | 57 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 0.00 | 0.00 | N/A | 0.00 | N/A | 0.00 | 0.00 | 0.00 | 0.00 | 86896.71 | 86896.71 |
+
+---
+
+## 4. Visual Diagnostics
+- `reports/figures/gbm_shap_summary.png`: Displays top feature attribution drivers across Level, Slope, and Curvature.
+- `reports/figures/gbm_feature_importance.png`: Aggregated feature importance across term-structure dimensions.

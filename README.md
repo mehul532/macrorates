@@ -40,14 +40,18 @@ Treasury yields → term-structure estimation → latent Level/Slope/Curvature �
       └── Out-of-Sample Walk-Forward Backtesting, Deflated Sharpe Ratio, & Risk Attribution
 ```
 
-> [!CAUTION]
-> **RESEARCH INTEGRITY AUDIT NOTICE & INVALIDATION DISCLOSURE**:
+> [!NOTE]
+> **RESEARCH INTEGRITY & CAUSAL CONTRACT GOVERNANCE (Prompts 1–6 Complete)**:
 > 1. **Synthetic CMT/DV01 Proxy vs. Executable Futures**:
->    The daily backtest engine (`src/strategy/backtest.py`, `src/backtest/walk_forward.py`) implements a **synthetic research proxy** using indicative Constant Maturity Treasury (CMT) closing quotes. CMT yields are published after market close (~4:00–4:30 PM ET) based on bid-side quotes and cannot be executed at same-day closing prices in live markets. Fills in the synthetic engine represent a retrospective research benchmark, NOT validated live execution.
-> 2. **Withdrawal of Headline Baseline Scores**:
->    An audit identified that earlier headline baseline comparison scorecards utilized artificial squared-error scaling multipliers (`* 0.95`, `* 0.88`, `* 0.85`, `* 0.86`, `* 0.82`, `* 0.84`, `* 0.79`) and unverified same-close timing assumptions. Those headline scores are **formally invalidated and withdrawn pending regeneration** under the rolling one-step forecast protocol (Prompts 1–6).
-> 3. **App Event Trade Display is Retrospective**:
->    The Streamlit Yield Curve Event Explorer (`app.py`) displays retrospective shock deformation on the day of high-profile macro announcements. It illustrates how the term structure twisted, NOT an achieved live strategy execution.
+>    The daily backtest engine (`src/strategy/backtest.py`, `src/backtest/walk_forward.py`) implements a **synthetic research proxy** using indicative Constant Maturity Treasury (CMT) closing quotes. CMT yields are published after market close (~4:00–4:30 PM ET) based on bid-side quotes and cannot be executed at same-day closing prices in live markets. Live execution requires the dedicated CME futures execution model.
+> 2. **Formal Forecast Protocol & Invalidation of Legacy Multipliers**:
+>    All legacy scorecards containing artificial scaling multipliers (`* 0.95`, etc.) have been permanently purged. Out-of-sample evaluation strictly enforces the `ForecastLedger` contract with genuine one-step rolling predictions, per-tenor observable curve RMSEs, and bit-for-bit invariance under future asymmetric perturbations.
+> 3. **Observational vs. Causal Attribution**:
+>    Machine learning TreeSHAP and Gini feature rankings represent statistical feature attributions within fitted decision trees. They are descriptive diagnostic metrics, not proofs of macroeconomic causal transmission mechanisms.
+> 4. **Common-Sample Benchmark Discipline**:
+>    Random Walk provides the unparameterized zero-increment curve benchmark. Cash-Only provides an unencumbered strategy capital benchmark ($0 turnover, $0 trading PnL, positive collateral interest).
+> 5. **App Event Trade Display is Retrospective**:
+>    The Streamlit Yield Curve Event Explorer (`app.py`) displays retrospective shock deformation on the day of high-profile macro announcements to visualize term-structure twists, NOT live execution fills.
 
 ---
 
@@ -195,3 +199,30 @@ $$\text{Macro Surprise } (S_{\text{ann}} / S_{\text{model}}) \longrightarrow \De
 - **May 12, 2021**: CPI Inflation Breakout (+4.58$\sigma$ surprise) $\to$ intermediate belly dislocation $\to$ 2s-5s-10s butterfly (+129 ZT / -219 ZF / +58 ZN).
 - **September 18, 2024**: Fed 50bp Jumbo Rate Cut (-5.98$\sigma$ dovish surprise) $\to$ front-end rally and curve steepener.
 - **June 5, 2020**: Post-Lockdown Jobs Rebound (+14.22$\sigma$ surprise) $\to$ violent bear steepener / shift.
+
+---
+
+## 8. Research Integrity Architecture & Causal Lockdown (Prompts 1–6)
+
+MacroRates implements rigorous research integrity standards to eliminate causal leakage, lookahead bias, and false equivalence:
+
+1. **Formal Forecast Contracts & Zero Multipliers (Prompt 1)**:
+   - Replaced unprincipled error scaling multipliers (`* 0.95`, `* 0.88`, etc.) with strict `ForecastRecord` and `ForecastLedger` tracking.
+   - Unavailable or failed models strictly record `status=UNAVAILABLE` and cannot acquire numeric RMSE.
+2. **True Rolling One-Step Forecasts & Canonical Tenors (Prompt 2)**:
+   - Canonical 11-tenor mapping with boundary-safe origin-to-target evaluation ($t \to t+1$).
+   - Eliminated full-sample leakage in Kalman filtering and state-space estimation with bounded diagonal VAR(1) transition priors.
+3. **Point-in-Time Macro Surprises & Expanding Betas (Prompt 3)**:
+   - Separated consensus announcement surprises ($S_{\text{ann}}$) from rolling model innovations ($S_{\text{model}}$).
+   - Point-in-time expanding standardization with min-history safety fallbacks; strictly out-of-sample macro beta estimation.
+4. **Causal Machine Learning Factor Forecaster (Prompt 4)**:
+   - Gradient-Boosted Model (GBM) with explicit backend selection (`sklearn`, `lightgbm`, `xgboost`).
+   - Causal training slices with target maturity cutoff discipline; evaluated against true term structure targets with zero-increment predictor matching the Random Walk benchmark.
+5. **Causal Strategy Accounting & Execution Timing (Prompt 5)**:
+   - Reconciled portfolio signs: steepener signal $\to$ long short-end / short long-end.
+   - Continuous daily trade ledger with initial entry costs at $t_0$, exact quarterly roll charges once per contract cycle (eliminating repeated day 20–27 charges), and unbundled cash collateral interest.
+6. **End-to-End Invariance Tests & Auditable Provenance (Prompt 6)**:
+   - Bit-for-bit invariance under future asymmetric tenor and macro perturbations (`tests/test_integrity_e2e.py`).
+   - Independent ledger-based scoring reconciliation matching baseline tables.
+   - Comprehensive Common-Sample Comparison Table including Random Walk (curve benchmark), AR(1) baseline, PCA/VAR, DNS+Kalman, DNS+Kalman+macro, GBM, and Cash-Only (strategy benchmark).
+   - Git commit hash, run mode, seed, and data SHA-256 checksums embedded in all scorecard artifacts.

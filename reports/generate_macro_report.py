@@ -29,6 +29,7 @@ from src.macro.macro_surprises import (
     plot_cpi_impulse_response,
 )
 from src.state_space.state_space import estimate_and_filter_state_space
+from src.backtest.walk_forward import get_git_commit_hash, get_file_checksum
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -183,8 +184,16 @@ def main():
     logger.info("Running Jordà local projections and plotting standout CPI IRF figure...")
     irf_ann_df, irf_mod_df, fig_path = run_local_projections_and_plot(factors_df, surprises_df)
 
-    # Save summary metrics JSON
+    # Save summary metrics JSON with provenance
     summary_data = {
+        "run_metadata": {
+            "git_commit": get_git_commit_hash(),
+            "data_checksums": {
+                "yield_panel": get_file_checksum("data/processed/yield_panel.parquet"),
+                "factor_panel": get_file_checksum("data/processed/factor_panel.parquet"),
+                "macro_surprises": get_file_checksum("data/processed/macro_surprises.parquet"),
+            },
+        },
         "contemporaneous_regressions": reg_results,
         "cpi_irf_announcement": irf_ann_df.to_dict(orient="records"),
         "cpi_irf_model_innovation": irf_mod_df.to_dict(orient="records"),

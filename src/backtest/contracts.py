@@ -293,3 +293,12 @@ class ForecastLedger:
             "reasons": reasons,
             "rmse": rmse,
         }
+
+    def get_records(self) -> List[ForecastRecord]:
+        """Return all forecast records."""
+        return list(self._records)
+
+    def summary_by_model(self) -> Dict[str, Any]:
+        """Return diagnostic coverage and status summary for all models in ledger."""
+        models = sorted(list(set(r.model_id for r in self._records)))
+        return {m: self.get_model_summary(m) for m in models}
