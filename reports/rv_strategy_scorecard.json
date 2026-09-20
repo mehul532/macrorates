@@ -1,0 +1,90 @@
+{
+  "2s10s_Cash_Baseline": {
+    "Total Return (%)": 42.95,
+    "CAGR (%)": 1.76,
+    "Annual Vol (%)": 0.13,
+    "Sharpe Ratio": 13.954,
+    "Sortino Ratio": 55016.641,
+    "Max Drawdown (%)": 0.0,
+    "Calmar Ratio": 0.0,
+    "Cost Drag (bp/yr)": 0.0,
+    "Net PnL ($)": 4295460.01
+  },
+  "2s10s_Slope_ZScore": {
+    "Total Return (%)": 0.35,
+    "CAGR (%)": 0.02,
+    "Annual Vol (%)": 4.81,
+    "Sharpe Ratio": 0.028,
+    "Sortino Ratio": 0.002,
+    "Max Drawdown (%)": -30.4,
+    "Calmar Ratio": 0.001,
+    "Cost Drag (bp/yr)": 102.2,
+    "Net PnL ($)": 34804.53
+  },
+  "2s10s_DNS_Factor": {
+    "Total Return (%)": 57.95,
+    "CAGR (%)": 2.26,
+    "Annual Vol (%)": 3.41,
+    "Sharpe Ratio": 0.671,
+    "Sortino Ratio": 0.053,
+    "Max Drawdown (%)": -9.52,
+    "Calmar Ratio": 0.237,
+    "Cost Drag (bp/yr)": 71.07,
+    "Net PnL ($)": 5795150.94
+  },
+  "2s10s_Macro_DNS": {
+    "Total Return (%)": 49.96,
+    "CAGR (%)": 2.0,
+    "Annual Vol (%)": 1.84,
+    "Sharpe Ratio": 1.088,
+    "Sortino Ratio": 0.084,
+    "Max Drawdown (%)": -5.88,
+    "Calmar Ratio": 0.34,
+    "Cost Drag (bp/yr)": 37.69,
+    "Net PnL ($)": 4996303.72
+  },
+  "Fly_Cash_Baseline": {
+    "Total Return (%)": 42.95,
+    "CAGR (%)": 1.76,
+    "Annual Vol (%)": 0.13,
+    "Sharpe Ratio": 13.954,
+    "Sortino Ratio": 55016.641,
+    "Max Drawdown (%)": 0.0,
+    "Calmar Ratio": 0.0,
+    "Cost Drag (bp/yr)": 0.0,
+    "Net PnL ($)": 4295460.01
+  },
+  "Fly_Curvature_ZScore": {
+    "Total Return (%)": 55.16,
+    "CAGR (%)": 2.17,
+    "Annual Vol (%)": 1.24,
+    "Sharpe Ratio": 1.734,
+    "Sortino Ratio": 0.131,
+    "Max Drawdown (%)": -4.5,
+    "Calmar Ratio": 0.482,
+    "Cost Drag (bp/yr)": 126.18,
+    "Net PnL ($)": 5515884.95
+  },
+  "Fly_DNS_Factor": {
+    "Total Return (%)": 21.25,
+    "CAGR (%)": 0.95,
+    "Annual Vol (%)": 1.47,
+    "Sharpe Ratio": 0.65,
+    "Sortino Ratio": 0.051,
+    "Max Drawdown (%)": -6.05,
+    "Calmar Ratio": 0.156,
+    "Cost Drag (bp/yr)": 72.82,
+    "Net PnL ($)": 2124973.92
+  },
+  "Fly_Macro_DNS": {
+    "Total Return (%)": 30.54,
+    "CAGR (%)": 1.31,
+    "Annual Vol (%)": 0.73,
+    "Sharpe Ratio": 1.783,
+    "Sortino Ratio": 0.135,
+    "Max Drawdown (%)": -2.82,
+    "Calmar Ratio": 0.465,
+    "Cost Drag (bp/yr)": 37.53,
+    "Net PnL ($)": 3053843.5
+  }
+}
