@@ -37,6 +37,9 @@ st.set_page_config(
 )
 
 # Custom Styling for Institutional Look
+st.markdown('<div class="main-header">Yield Curve Event Explorer</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Macroeconomic Transmission, Latent Yield Factors, and Relative-Value Trade Retrospective Diagnostic</div>', unsafe_allow_html=True)
+st.caption("⚠️ **RESEARCH INTEGRITY NOTICE**: This dashboard provides retrospective term structure shock diagnostics using synthetic CMT indicative yields. It illustrates economic shock propagation, not achieved live strategy execution.")
 st.markdown("""
 <style>
     .main-header {
@@ -306,8 +309,13 @@ def render_explorer():
             
         st.info(f"**Term Structure Diagnosis**: **{shape_desc}**. Consistent with Milestone 4 empirical event-study impulse response.")
 
-        # 4. STEP 4: TRADE EXECUTION
-        st.markdown('<div class="step-banner">STEP 4: DV01-NEUTRAL RELATIVE-VALUE TRADE</div>', unsafe_allow_html=True)
+        # 4. STEP 4: RETROSPECTIVE EVENT TRADE DIAGNOSTIC
+        st.markdown('<div class="step-banner">STEP 4: RETROSPECTIVE EVENT SHOCK TRADE (SYNTHETIC PROXY)</div>', unsafe_allow_html=True)
+        st.warning(
+            "⚠️ **RESEARCH INTEGRITY DISCLOSURE**: This relative-value trade is an illustrative retrospective diagnostic "
+            "evaluating how the observed announcement surprise projects onto a DV01-neutral structure. "
+            "It is NOT an achieved or executable live trading result."
+        )
         
         # Decide trade based on event nature
         if selected_indicator in ("CPI", "CORE_CPI") and abs(dC) > 2.0:
@@ -333,8 +341,9 @@ def render_explorer():
             f"**[CONFIRMED NEUTRAL ✅]**"
         )
 
-        # 5. STEP 5: P&L ATTRIBUTION
-        st.markdown('<div class="step-banner">STEP 5: EVENT P&L ATTRIBUTION WATERFALL</div>', unsafe_allow_html=True)
+        # 5. STEP 5: RETROSPECTIVE P&L ATTRIBUTION
+        st.markdown('<div class="step-banner">STEP 5: RETROSPECTIVE EVENT P&L ATTRIBUTION (ILLUSTRATIVE)</div>', unsafe_allow_html=True)
+        st.caption("Note: P&L is calculated retrospectively from the same-day CMT yield shift to illustrate how the curve move would project onto DV01 weights. This is not an executed fill.")
         
         # Calculate daily gross pnl
         zt_dpnl = -DEFAULT_FUTURES_DV01["ZT"] * dy_bp[4]  # 2Y

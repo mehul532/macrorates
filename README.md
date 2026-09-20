@@ -36,9 +36,18 @@ Treasury yields → term-structure estimation → latent Level/Slope/Curvature �
   [4] Systematic Relative-Value Strategy & Execution
       ├── Curve Mispricing & Butterfly Dislocation Signals (2Y-5Y-10Y, 5Y-10Y-30Y)
       ├── Analytical DV01-Neutral Weighting & Duration Immunization
-      ├── Treasury Futures Replication (ZT, ZF, ZN, TN, UB) with Roll-Yield & Repo Costs
+      ├── Synthetic Constant Maturity Treasury (CMT) DV01-Neutral Proxy
       └── Out-of-Sample Walk-Forward Backtesting, Deflated Sharpe Ratio, & Risk Attribution
 ```
+
+> [!CAUTION]
+> **RESEARCH INTEGRITY AUDIT NOTICE & INVALIDATION DISCLOSURE**:
+> 1. **Synthetic CMT/DV01 Proxy vs. Executable Futures**:
+>    The daily backtest engine (`src/strategy/backtest.py`, `src/backtest/walk_forward.py`) implements a **synthetic research proxy** using indicative Constant Maturity Treasury (CMT) closing quotes. CMT yields are published after market close (~4:00–4:30 PM ET) based on bid-side quotes and cannot be executed at same-day closing prices in live markets. Fills in the synthetic engine represent a retrospective research benchmark, NOT validated live execution.
+> 2. **Withdrawal of Headline Baseline Scores**:
+>    An audit identified that earlier headline baseline comparison scorecards utilized artificial squared-error scaling multipliers (`* 0.95`, `* 0.88`, `* 0.85`, `* 0.86`, `* 0.82`, `* 0.84`, `* 0.79`) and unverified same-close timing assumptions. Those headline scores are **formally invalidated and withdrawn pending regeneration** under the rolling one-step forecast protocol (Prompts 1–6).
+> 3. **App Event Trade Display is Retrospective**:
+>    The Streamlit Yield Curve Event Explorer (`app.py`) displays retrospective shock deformation on the day of high-profile macro announcements. It illustrates how the term structure twisted, NOT an achieved live strategy execution.
 
 ---
 

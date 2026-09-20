@@ -11,12 +11,20 @@ from src.backtest.walk_forward import (
     WalkForwardConfig,
     WalkForwardHarness,
 )
+from src.backtest.contracts import (
+    ForecastStatus,
+    ForecastRecord,
+    ForecastLedger,
+    ExecutionTimingAssumption,
+    DecisionContract,
+)
 from src.backtest.backtest import (
     compute_episode_performance,
     compute_regime_robustness_table,
     CostModelV1Config,
     BacktestResult,
     RelativeValueBacktestEngine,
+    SyntheticDV01Backtest,
 )
 
 __all__ = [
@@ -30,4 +38,10 @@ __all__ = [
     "CostModelV1Config",
     "BacktestResult",
     "RelativeValueBacktestEngine",
+    "SyntheticDV01Backtest",
+    "ForecastStatus",
+    "ForecastRecord",
+    "ForecastLedger",
+    "ExecutionTimingAssumption",
+    "DecisionContract",
 ]

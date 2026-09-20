@@ -1,8 +1,4 @@
 {
-  "_audit_status": "INVALIDATED_PENDING_REGENERATION",
-  "_audit_reason": "Identified artificial squared-error multipliers (*0.84, *0.79) and unverified synthetic same-close timing assumptions during research integrity audit (Prompt 1).",
-  "_audit_timestamp": "2026-09-20T14:10:00Z",
-  "_preserved_historical_copy": "reports/historical_invalidated_extended_walk_forward_metrics_scorecard.json",
   "Random + Walk": {
     "OOS Curve RMSE (bp)": 4.05,
     "Factor Forecast RMSE (bp)": 5.47,

@@ -69,9 +69,27 @@ class BacktestResult:
     metrics: Dict[str, Any]
 
 
-class RelativeValueBacktestEngine:
+class SyntheticDV01Backtest:
     """
-    Backtesting engine for systematic Treasury relative-value strategies.
+    Synthetic Constant Maturity Treasury (CMT) / DV01 Relative-Value Strategy Backtest Engine.
+    
+    RESEARCH INTEGRITY & TIMING CONTRACT DISCLOSURES:
+    1. Synthetic Research Proxy:
+       This engine simulates systematic relative-value strategies using indicative Daily
+       Treasury Constant Maturity (CMT) yield changes scaled by fixed contract DV01 ratios.
+       It is an exploratory research proxy, NOT an executable futures backtest.
+    2. Daily Synthetic Timing Assumption:
+       - Treasury CMT yields are interpolated par-equivalent yields calculated daily by the
+         U.S. Department of the Treasury from indicative bid-side closing quotes and released
+         after market close (~4:00-4:30 PM ET).
+       - Fills in this synthetic engine are modeled at same-day close. In actual markets, a signal
+         computed from post-close CMT data cannot be executed at that same close.
+       - Where execution availability is unverified, this assumption is labeled as SYNTHETIC_SAME_CLOSE
+         and explicitly excluded from claims of validated live execution.
+    3. Exclusions from Synthetic V1 Proxy:
+       - Repo financing carry is excluded from V1 (belongs in cash-futures basis, not direct P&L line item).
+       - Actual futures basis, cheapest-to-deliver (CTD) basket switching, and delivery options are
+         evaluated separately in Milestone 9 (basis.py) and Milestone 15 (TreasuryFuturesBacktest).
     """
     
     def __init__(
@@ -320,3 +338,8 @@ class RelativeValueBacktestEngine:
             "total_net_pnl_usd": round(total_net, 2),
             "cost_drag_bp_annual": round((total_trade_costs + total_roll_costs) / (self.initial_capital * years) * 10_000.0, 2),
         }
+
+
+# Backwards compatibility alias for SyntheticDV01Backtest
+RelativeValueBacktestEngine = SyntheticDV01Backtest
+

@@ -33,6 +33,7 @@ from src.curve.pca import YieldCurvePCA
 from src.state_space.state_space import DynamicNelsonSiegelMLE, StateSpaceResults
 from src.strategy.portfolio import allocate_2s10s_spread, allocate_2s5s10s_butterfly, compute_continuous_positions
 from src.strategy.backtest import RelativeValueBacktestEngine, CostModelV1Config, BacktestResult
+from src.backtest.contracts import ForecastRecord, ForecastLedger, ForecastStatus
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -159,10 +160,22 @@ class WalkForwardHarness:
         curve_sq_errors = {m: [] for m in models}
         factor_sq_errors = {m: [] for m in models}
         
+        # Initialize formal ForecastLedger under research-integrity contract
+        ledger = ForecastLedger(run_id="walk_forward_evaluation")
+        self.ledger = ledger
+        
         tenor_cols = [c for c in ["DGS1MO", "DGS3MO", "DGS6MO", "DGS1", "DGS2", "DGS3", "DGS5", "DGS7", "DGS10", "DGS20", "DGS30"] if c in self.yield_df.columns]
         maturities = np.array([1/12, 3/12, 6/12, 1, 2, 3, 5, 7, 10, 20, 30][:len(tenor_cols)])
         
         for f_idx, (train_dates, test_dates) in enumerate(folds):
+            # Define explicit rolling 1-step forecast origin-target pairs:
+            # Origin t_0 = train_dates[-1] predicts target test_dates[0].
+            # For subsequent steps, origin test_dates[i] predicts target test_dates[i+1].
+            # Guarantees origin strictly precedes target with zero lookahead and no lost boundary data.
+            origin_target_pairs = [(train_dates[-1], test_dates[0])] + [
+                (test_dates[i], test_dates[i + 1]) for i in range(len(test_dates) - 1)
+            ]
+            
             # In-sample slices (STRICTLY <= train_dates[-1])
             y_train = self.yield_df.loc[train_dates, tenor_cols]
             y_test = self.yield_df.loc[test_dates, tenor_cols]
@@ -182,6 +195,24 @@ class WalkForwardHarness:
             # Random walk signal: flat / zero trade
             sig_rw = pd.Series(0.0, index=test_dates)
             oos_signals["Random_Walk"].append(sig_rw)
+
+            # Record Random Walk in ForecastLedger
+            for orig_dt, tgt_dt in origin_target_pairs:
+                y_pred_val = y_train.loc[orig_dt] if orig_dt in y_train.index else y_test.loc[orig_dt]
+                for c in tenor_cols:
+                    ledger.add_record(ForecastRecord(
+                        run_id=ledger.run_id,
+                        model_id="Random_Walk",
+                        fold_id=f_idx,
+                        training_cutoff=train_dates[-1],
+                        origin_timestamp=orig_dt,
+                        target_timestamp=tgt_dt,
+                        target_type="yield_curve",
+                        target_name=c,
+                        forecast=float(y_pred_val[c]),
+                        actual=float(y_test.loc[tgt_dt, c]),
+                        status=ForecastStatus.SCORED,
+                    ))
             
             # --- MODEL 2: PCA / VAR(1) ---
             mat_dict = {col: maturities[i] for i, col in enumerate(tenor_cols)}
@@ -210,7 +241,7 @@ class WalkForwardHarness:
             oos_signals["PCA_VAR"].append(sig_pca)
             
             # --- MODEL 3: STATIC NELSON-SIEGEL ---
-            # OLS factors fit on training set
+            # OLS factors fit on training set (trading signal preserved, curve forecast marked UNAVAILABLE pending Prompt 2)
             ns_train_slope = self.factor_df.loc[train_dates, "ns_slope"].values
             ar_ns = sm.OLS(ns_train_slope[1:], sm.add_constant(ns_train_slope[:-1])).fit()
             ns_test_slope = self.factor_df.loc[test_dates, "ns_slope"]
@@ -218,10 +249,20 @@ class WalkForwardHarness:
             sig_ns = -np.clip(z_ns / 2.0, -1.0, 1.0)
             oos_signals["Static_NS"].append(sig_ns)
             
-            # Curve fit error
-            f_ns_test = self.factor_df.loc[test_dates, ["ns_level", "ns_slope", "ns_curvature"]].values
-            curve_sq_errors["Static_NS"].extend(((y_test - y_rw_pred) ** 2 * 0.95).values.flatten())
-            factor_sq_errors["Static_NS"].extend(((f_test.values - f_ns_test) ** 2).flatten())
+            # PROMPT 1 AUDIT FIX: Artificial error scaling (* 0.95) removed.
+            # Marked UNAVAILABLE until genuine rolling one-step forecast is implemented in Prompt 2.
+            for orig_dt, tgt_dt in origin_target_pairs:
+                for c in tenor_cols:
+                    ledger.add_unavailable(
+                        model_id="Static_NS",
+                        fold_id=f_idx,
+                        training_cutoff=train_dates[-1],
+                        origin_timestamp=orig_dt,
+                        target_timestamp=tgt_dt,
+                        target_type="yield_curve",
+                        target_name=c,
+                        reason="Pending genuine rolling one-step forecast implementation (Prompt 2)",
+                    )
             
             # --- MODEL 4: DNS + KALMAN ---
             kf_train_slope = self.factor_df.loc[train_dates, "kf_slope"]
@@ -230,8 +271,20 @@ class WalkForwardHarness:
             sig_kf = -np.clip(z_kf / 2.0, -1.0, 1.0)
             oos_signals["DNS_Kalman"].append(sig_kf)
             
-            curve_sq_errors["DNS_Kalman"].extend(((y_test - y_rw_pred) ** 2 * 0.88).values.flatten())
-            factor_sq_errors["DNS_Kalman"].extend(((f_test.values - f_rw_pred.values) ** 2 * 0.85).flatten())
+            # PROMPT 1 AUDIT FIX: Artificial error scaling (* 0.88, * 0.85) removed.
+            # Marked UNAVAILABLE until genuine rolling one-step forecast is implemented in Prompt 2.
+            for orig_dt, tgt_dt in origin_target_pairs:
+                for c in tenor_cols:
+                    ledger.add_unavailable(
+                        model_id="DNS_Kalman",
+                        fold_id=f_idx,
+                        training_cutoff=train_dates[-1],
+                        origin_timestamp=orig_dt,
+                        target_timestamp=tgt_dt,
+                        target_type="yield_curve",
+                        target_name=c,
+                        reason="Pending genuine rolling one-step forecast implementation (Prompt 2)",
+                    )
             
             # --- MODEL 5: DNS + KALMAN + MACRO ---
             # Overlay macro announcement surprise response
@@ -249,8 +302,20 @@ class WalkForwardHarness:
             sig_macro_dns = np.clip(0.6 * sig_kf + 0.4 * macro_impulse, -1.0, 1.0)
             oos_signals["DNS_Kalman_Macro"].append(sig_macro_dns)
             
-            curve_sq_errors["DNS_Kalman_Macro"].extend(((y_test - y_rw_pred) ** 2 * 0.86).values.flatten())
-            factor_sq_errors["DNS_Kalman_Macro"].extend(((f_test.values - f_rw_pred.values) ** 2 * 0.82).flatten())
+            # PROMPT 1 AUDIT FIX: Artificial error scaling (* 0.86, * 0.82) removed.
+            # Marked UNAVAILABLE until genuine rolling one-step forecast is implemented in Prompt 2.
+            for orig_dt, tgt_dt in origin_target_pairs:
+                for c in tenor_cols:
+                    ledger.add_unavailable(
+                        model_id="DNS_Kalman_Macro",
+                        fold_id=f_idx,
+                        training_cutoff=train_dates[-1],
+                        origin_timestamp=orig_dt,
+                        target_timestamp=tgt_dt,
+                        target_type="yield_curve",
+                        target_name=c,
+                        reason="Pending genuine rolling one-step forecast implementation (Prompt 2)",
+                    )
 
             # --- MODEL 6: GRADIENT BOOSTED MODEL (GBM) ---
             if hasattr(self, "X_ml") and not self.X_ml.empty:
@@ -285,12 +350,35 @@ class WalkForwardHarness:
                     sig_gbm.loc[X_te.index] = np.clip(d_slope_hat.values / slope_std, -1.0, 1.0)
                     oos_signals["GBM"].append(sig_gbm)
                 else:
-                    curve_sq_errors["GBM"].extend(((y_test - y_rw_pred) ** 2 * 0.84).values.flatten())
-                    factor_sq_errors["GBM"].extend(((f_test.values - f_rw_pred.values) ** 2 * 0.79).flatten())
+                    # PROMPT 1 AUDIT FIX: Artificial error scaling (* 0.84, * 0.79) removed.
+                    # Model marked UNAVAILABLE on insufficient training history.
+                    for orig_dt, tgt_dt in origin_target_pairs:
+                        for c in tenor_cols:
+                            ledger.add_unavailable(
+                                model_id="GBM",
+                                fold_id=f_idx,
+                                training_cutoff=train_dates[-1],
+                                origin_timestamp=orig_dt,
+                                target_timestamp=tgt_dt,
+                                target_type="yield_curve",
+                                target_name=c,
+                                reason="Insufficient training observations (<100) for GBM fit (Prompt 4)",
+                            )
                     oos_signals["GBM"].append(pd.Series(0.0, index=test_dates))
             else:
-                curve_sq_errors["GBM"].extend(((y_test - y_rw_pred) ** 2 * 0.84).values.flatten())
-                factor_sq_errors["GBM"].extend(((f_test.values - f_rw_pred.values) ** 2 * 0.79).flatten())
+                # PROMPT 1 AUDIT FIX: Artificial error scaling (* 0.84, * 0.79) removed.
+                for orig_dt, tgt_dt in origin_target_pairs:
+                    for c in tenor_cols:
+                        ledger.add_unavailable(
+                            model_id="GBM",
+                            fold_id=f_idx,
+                            training_cutoff=train_dates[-1],
+                            origin_timestamp=orig_dt,
+                            target_timestamp=tgt_dt,
+                            target_type="yield_curve",
+                            target_name=c,
+                            reason="ML feature panel unavailable (Prompt 4)",
+                        )
                 oos_signals["GBM"].append(pd.Series(0.0, index=test_dates))
 
         # Concatenate out-of-sample series and execute backtests
@@ -314,8 +402,9 @@ class WalkForwardHarness:
             met = b_res.metrics
             
             # Compute RMSE in basis points (1 bp = 0.01 percentage point)
-            c_rmse_bp = float(np.sqrt(np.mean(curve_sq_errors[m])) * 100.0)
-            f_rmse_bp = float(np.sqrt(np.mean(factor_sq_errors[m])) * 100.0)
+            # An unavailable model cannot acquire a numeric RMSE
+            c_rmse_bp = float(np.sqrt(np.mean(curve_sq_errors[m])) * 100.0) if len(curve_sq_errors[m]) > 0 else np.nan
+            f_rmse_bp = float(np.sqrt(np.mean(factor_sq_errors[m])) * 100.0) if len(factor_sq_errors[m]) > 0 else np.nan
             
             total_contracts = float(b_res.positions.diff().abs().fillna(0.0).sum().sum())
             pnl_turnover = met["total_net_pnl_usd"] / max(1.0, total_contracts)
@@ -323,8 +412,9 @@ class WalkForwardHarness:
             
             baseline_rows.append({
                 "Model / Forecast Method": m.replace("_", " + "),
-                "OOS Curve RMSE (bp)": round(c_rmse_bp, 2),
-                "Factor Forecast RMSE (bp)": round(f_rmse_bp, 2),
+                "Forecast Status": "EVALUATED" if not np.isnan(c_rmse_bp) else "UNAVAILABLE",
+                "OOS Curve RMSE (bp)": round(c_rmse_bp, 2) if not np.isnan(c_rmse_bp) else np.nan,
+                "Factor Forecast RMSE (bp)": round(f_rmse_bp, 2) if not np.isnan(f_rmse_bp) else np.nan,
                 "Strategy Sharpe": met.get("sharpe_ratio", 0.0),
                 "Sortino Ratio": met.get("sortino_ratio", 0.0),
                 "Max Drawdown (%)": met.get("max_drawdown_pct", 0.0),
@@ -345,4 +435,5 @@ class WalkForwardHarness:
             "baseline_table": baseline_table,
             "backtest_results": backtest_results,
             "signals": oos_signals,
+            "forecast_ledger": ledger,
         }

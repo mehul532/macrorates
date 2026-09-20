@@ -4,6 +4,10 @@
 **Models**: Random Walk, PCA/VAR(1), Static NS, DNS+Kalman, DNS+Kalman+Macro, Gradient Boosted Model (GBM)  
 **Discipline**: Strict No-Lookahead, Purged Rolling Folds (756d Lookback, 21d Refit), `fed_regime_ex_ante` ONLY  
 
+> [!WARNING]
+> **RESEARCH INTEGRITY AUDIT NOTICE (INVALIDATED PENDING REGENERATION)**:
+> The headline performance numbers in this document (e.g. GBM Sharpe 4.76, scaled RMSEs) were generated using unverified synthetic fallback assumptions and artificial error multipliers (*0.84, *0.79). They are formally invalidated and pending regeneration under the Prompts 1–6 rolling one-step forecast protocol.
+
 ---
 
 ## 1. Executive Verdict & Core Findings

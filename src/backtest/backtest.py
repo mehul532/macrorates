@@ -19,6 +19,7 @@ from src.strategy.backtest import (
     CostModelV1Config,
     BacktestResult,
     RelativeValueBacktestEngine,
+    SyntheticDV01Backtest,
 )
 from src.backtest.regimes import load_episodes_config, tag_fed_regimes, slice_metrics_by_regime
 
