@@ -59,6 +59,7 @@ class WalkForwardConfig:
     initial_capital: float = 10_000_000.0
     target_dv01: float = 10_000.0
     cost_config: CostModelV1Config = field(default_factory=CostModelV1Config)
+    gbm_backend: str = "sklearn"
 
 
 class WalkForwardHarness:
@@ -414,45 +415,99 @@ class WalkForwardHarness:
 
             # --- MODEL 6: GRADIENT BOOSTED MODEL (GBM) ---
             if hasattr(self, "X_ml") and not self.X_ml.empty:
-                train_mask = self.X_ml.index.isin(train_dates)
-                test_mask = self.X_ml.index.isin(test_dates)
-                X_tr = self.X_ml[train_mask]
-                y_tr = self.y_ml[train_mask]
-                X_te = self.X_ml[test_mask]
+                from src.model.ml_baseline import FactorFeatureEngineer, GradientBoostedFactorForecaster, GBMForecasterConfig
+                train_cutoff = train_dates[-1]
+                X_tr, y_tr = FactorFeatureEngineer.get_training_slice(self.X_ml, self.y_ml, training_cutoff=train_cutoff)
 
-                if len(X_tr) >= 100 and len(X_te) > 0:
-                    from src.model.ml_baseline import GradientBoostedFactorForecaster, GBMForecasterConfig
-                    gbm = GradientBoostedFactorForecaster(
-                        config=GBMForecasterConfig(n_estimators=30, learning_rate=0.05, max_depth=3)
-                    )
-                    gbm.fit(X_tr, y_tr)
-                    curr_f = X_te[["level_t0", "slope_t0", "curvature_t0"]]
-                    f_pred_gbm = gbm.forecast_factors(X_te, curr_f)
-                    c_pred_gbm = gbm.reconstruct_yield_curve(f_pred_gbm, maturities=maturities)
+                if len(X_tr) >= 100:
+                    backend = getattr(self.config, "gbm_backend", "sklearn")
+                    try:
+                        gbm = GradientBoostedFactorForecaster(
+                            config=GBMForecasterConfig(backend=backend, n_estimators=30, learning_rate=0.05, max_depth=3)
+                        )
+                        gbm.fit(X_tr, y_tr)
+                        
+                        slope_std = float(y_tr["target_dSlope"].std()) + 1e-6
+                        sig_gbm_series = pd.Series(0.0, index=test_dates)
 
-                    # Re-align with test_dates
-                    f_true_gbm = self.factor_df.loc[X_te.index, ["kf_level", "kf_slope", "kf_curvature"]].values
-                    f_pred_vals = f_pred_gbm[["level_hat", "slope_hat", "curvature_hat"]].values
-                    factor_sq_errors["GBM"].extend(((f_true_gbm - f_pred_vals) ** 2).flatten())
+                        for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
+                            if orig_dt in self.X_ml.index:
+                                x_row = self.X_ml.loc[[orig_dt]]
+                                curr_f = x_row[["level_t0", "slope_t0", "curvature_t0"]]
+                                f_hat = gbm.forecast_factors(x_row, curr_f)
+                                c_hat = gbm.reconstruct_yield_curve(f_hat, maturities=maturities).values[0]
 
-                    y_true_gbm = y_test.loc[X_te.index].values
-                    curve_sq_errors["GBM"].extend(((y_true_gbm - c_pred_gbm.values) ** 2).flatten())
+                                # Actual observation at tgt_dt
+                                actual_y = y_test.iloc[k].values
+                                curve_sq_errors["GBM"].extend(((actual_y - c_hat) ** 2).tolist())
 
-                    # Signal from predicted slope change (long steepener if slope predicted to rise)
-                    d_slope_hat = gbm.predict_increments(X_te)["dSlope_hat"]
-                    slope_std = y_tr["target_dSlope"].std() + 1e-6
-                    sig_gbm = pd.Series(0.0, index=test_dates)
-                    sig_gbm.loc[X_te.index] = np.clip(d_slope_hat.values / slope_std, -1.0, 1.0)
-                    oos_signals["GBM"].append(sig_gbm)
+                                # Observable spreads
+                                c_hat_2d = c_hat.reshape(1, -1)
+                                actual_y_2d = actual_y.reshape(1, -1)
+                                sp_pred = compute_observable_spreads(c_hat_2d, tenor_cols)
+                                sp_act = compute_observable_spreads(actual_y_2d, tenor_cols)
+                                if "2s10s" in sp_pred and "2s10s" in sp_act:
+                                    diff_2s10s = float((sp_act["2s10s"] - sp_pred["2s10s"]).item())
+                                    spread_2s10s_sq_errors["GBM"].append(diff_2s10s ** 2)
+                                    factor_sq_errors["GBM"].append(diff_2s10s ** 2)
+                                if "2s5s10s" in sp_pred and "2s5s10s" in sp_act:
+                                    diff_fly = float((sp_act["2s5s10s"] - sp_pred["2s5s10s"]).item())
+                                    fly_2s5s10s_sq_errors["GBM"].append(diff_fly ** 2)
+
+                                # Signal at tgt_dt based on forecast made at orig_dt
+                                d_slope = float(gbm.predict_increments(x_row)["dSlope_hat"].iloc[0])
+                                sig_gbm_series.loc[tgt_dt] = float(np.clip(d_slope / slope_std, -1.0, 1.0))
+
+                                for c_idx, c in enumerate(tenor_cols):
+                                    ledger.add_record(ForecastRecord(
+                                        run_id=ledger.run_id,
+                                        model_id="GBM",
+                                        fold_id=f_idx,
+                                        training_cutoff=train_cutoff,
+                                        origin_timestamp=orig_dt,
+                                        target_timestamp=tgt_dt,
+                                        target_type="yield_curve",
+                                        target_name=c,
+                                        forecast=float(c_hat[c_idx]),
+                                        actual=float(actual_y[c_idx]),
+                                        status=ForecastStatus.SCORED,
+                                    ))
+                            else:
+                                for c in tenor_cols:
+                                    ledger.add_unavailable(
+                                        model_id="GBM",
+                                        fold_id=f_idx,
+                                        training_cutoff=train_cutoff,
+                                        origin_timestamp=orig_dt,
+                                        target_timestamp=tgt_dt,
+                                        target_type="yield_curve",
+                                        target_name=c,
+                                        reason=f"Features missing for origin date {orig_dt} (Prompt 4)",
+                                    )
+
+                        oos_signals["GBM"].append(sig_gbm_series)
+                    except Exception as e:
+                        logger.warning("GBM estimation failed on fold %d: %s", f_idx, e)
+                        for orig_dt, tgt_dt in origin_target_pairs:
+                            for c in tenor_cols:
+                                ledger.add_unavailable(
+                                    model_id="GBM",
+                                    fold_id=f_idx,
+                                    training_cutoff=train_cutoff,
+                                    origin_timestamp=orig_dt,
+                                    target_timestamp=tgt_dt,
+                                    target_type="yield_curve",
+                                    target_name=c,
+                                    reason=f"GBM fitting failed: {e}",
+                                )
+                        oos_signals["GBM"].append(pd.Series(0.0, index=test_dates))
                 else:
-                    # PROMPT 1 AUDIT FIX: Artificial error scaling (* 0.84, * 0.79) removed.
-                    # Model marked UNAVAILABLE on insufficient training history.
                     for orig_dt, tgt_dt in origin_target_pairs:
                         for c in tenor_cols:
                             ledger.add_unavailable(
                                 model_id="GBM",
                                 fold_id=f_idx,
-                                training_cutoff=train_dates[-1],
+                                training_cutoff=train_cutoff,
                                 origin_timestamp=orig_dt,
                                 target_timestamp=tgt_dt,
                                 target_type="yield_curve",
@@ -461,7 +516,6 @@ class WalkForwardHarness:
                             )
                     oos_signals["GBM"].append(pd.Series(0.0, index=test_dates))
             else:
-                # PROMPT 1 AUDIT FIX: Artificial error scaling (* 0.84, * 0.79) removed.
                 for orig_dt, tgt_dt in origin_target_pairs:
                     for c in tenor_cols:
                         ledger.add_unavailable(

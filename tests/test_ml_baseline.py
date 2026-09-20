@@ -50,10 +50,11 @@ def test_feature_engineer_no_leakage():
     assert "surp_ann_FOMC" in X.columns
     assert "surp_model_FOMC" in X.columns
 
-    # 3. Clean dimensions and no NaNs
+    # 3. Clean dimensions, fully populated features, and targets observed for all but latest origin
     assert len(X) == len(y)
     assert not X.isna().any().any()
-    assert not y.isna().any().any()
+    assert not y.iloc[:-1].isna().any().any()
+    assert pd.isna(y.iloc[-1]["target_date"])
     assert {"target_dLevel", "target_dSlope", "target_dCurvature"}.issubset(y.columns)
 
 

@@ -150,26 +150,55 @@ class FactorFeatureEngineer:
 
         # 8. Target variables: Forward 1-step change in factors (t -> t+1)
         targets = pd.DataFrame(index=common_idx)
+        targets["origin_date"] = common_idx
+        target_dates = pd.Series(common_idx, index=common_idx).shift(-1)
+        targets["target_date"] = target_dates
+        targets["label_available_at"] = target_dates
+
         targets["target_dLevel"] = f_df[lvl_col].shift(-1) - f_df[lvl_col]
         targets["target_dSlope"] = f_df[slp_col].shift(-1) - f_df[slp_col]
         targets["target_dCurvature"] = f_df[cur_col].shift(-1) - f_df[cur_col]
+        targets["target_Level"] = f_df[lvl_col].shift(-1)
+        targets["target_Slope"] = f_df[slp_col].shift(-1)
+        targets["target_Curvature"] = f_df[cur_col].shift(-1)
 
-        # Drop initial warmup NaNs and final unobserved target row
-        valid_mask = features.notna().all(axis=1) & targets.notna().all(axis=1)
-        X_clean = features[valid_mask].copy()
-        y_clean = targets[valid_mask].copy()
+        # Drop initial warmup NaNs in features, but keep features for all valid origin dates
+        valid_features = features.notna().all(axis=1)
+        X_clean = features[valid_features].copy()
+        y_clean = targets.loc[X_clean.index].copy()
 
         feature_cols = list(X_clean.columns)
         return X_clean, y_clean, feature_cols
 
+    @staticmethod
+    def get_training_slice(
+        X: pd.DataFrame,
+        y: pd.DataFrame,
+        training_cutoff: pd.Timestamp,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Select training rows strictly whose target labels mature <= training_cutoff.
+        
+        RESEARCH INTEGRITY & CAUSAL BOUNDARY (Prompt 4):
+        - Origin row t is included IF AND ONLY IF target_date (t+1) <= training_cutoff.
+        - The boundary row at t = training_cutoff (whose target matures at t+1) is EXCLUDED.
+        """
+        mask = (
+            (y["origin_date"] <= training_cutoff)
+            & (y["label_available_at"] <= training_cutoff)
+            & y["target_dSlope"].notna()
+        )
+        return X.loc[mask].copy(), y.loc[mask].copy()
+
 
 # ---------------------------------------------------------------------------
-# 2. Gradient-Boosted Model (LightGBM) Forecaster
+# 2. Gradient-Boosted Model Forecaster (Explicit Backend Selection)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class GBMForecasterConfig:
-    """Hyperparameters for LightGBM factor forecaster."""
+    """Hyperparameters and backend selection for factor forecaster."""
+    backend: str = "sklearn"  # Explicit backend: "sklearn", "lightgbm", or "xgboost"
     n_estimators: int = 100
     learning_rate: float = 0.03
     num_leaves: int = 15
@@ -195,77 +224,62 @@ class GradientBoostedFactorForecaster:
         self.config = config or GBMForecasterConfig()
         self.models: Dict[str, Any] = {}
         self.feature_names_: List[str] = []
+        self.backend_name_: str = self.config.backend.lower()
         self._is_fitted: bool = False
 
     def _init_model(self) -> Any:
-        # Try LightGBM
-        try:
-            import lightgbm as lgb
-            m = lgb.LGBMRegressor(
-                n_estimators=self.config.n_estimators,
-                learning_rate=self.config.learning_rate,
-                num_leaves=self.config.num_leaves,
-                max_depth=self.config.max_depth,
-                min_child_samples=self.config.min_child_samples,
-                subsample=self.config.subsample,
-                colsample_bytree=self.config.colsample_bytree,
-                random_state=self.config.random_state,
-                verbose=self.config.verbose,
-            )
-            # Test-fit a dummy sample to ensure dylib is loadable
-            m.fit(np.zeros((5, 2)), np.zeros(5))
-            return lgb.LGBMRegressor(
-                n_estimators=self.config.n_estimators,
-                learning_rate=self.config.learning_rate,
-                num_leaves=self.config.num_leaves,
-                max_depth=self.config.max_depth,
-                min_child_samples=self.config.min_child_samples,
-                subsample=self.config.subsample,
-                colsample_bytree=self.config.colsample_bytree,
-                random_state=self.config.random_state,
-                verbose=self.config.verbose,
-            )
-        except Exception:
-            pass
-
-        # Try XGBoost
-        try:
-            import xgboost as xgb
-            m = xgb.XGBRegressor(
-                n_estimators=self.config.n_estimators,
-                learning_rate=self.config.learning_rate,
-                max_depth=self.config.max_depth,
-                random_state=self.config.random_state,
-                verbosity=0,
-            )
-            m.fit(np.zeros((5, 2)), np.zeros(5))
-            return xgb.XGBRegressor(
+        backend = self.config.backend.lower()
+        if backend == "lightgbm":
+            try:
+                import lightgbm as lgb
+                return lgb.LGBMRegressor(
+                    n_estimators=self.config.n_estimators,
+                    learning_rate=self.config.learning_rate,
+                    num_leaves=self.config.num_leaves,
+                    max_depth=self.config.max_depth,
+                    min_child_samples=self.config.min_child_samples,
+                    subsample=self.config.subsample,
+                    colsample_bytree=self.config.colsample_bytree,
+                    random_state=self.config.random_state,
+                    verbose=self.config.verbose,
+                )
+            except ImportError as e:
+                raise ImportError(f"Explicit backend 'lightgbm' requested, but lightgbm is not available: {e}")
+        elif backend == "xgboost":
+            try:
+                import xgboost as xgb
+                return xgb.XGBRegressor(
+                    n_estimators=self.config.n_estimators,
+                    learning_rate=self.config.learning_rate,
+                    max_depth=self.config.max_depth,
+                    random_state=self.config.random_state,
+                    verbosity=0,
+                )
+            except ImportError as e:
+                raise ImportError(f"Explicit backend 'xgboost' requested, but xgboost is not available: {e}")
+        elif backend == "sklearn":
+            from sklearn.ensemble import GradientBoostingRegressor
+            return GradientBoostingRegressor(
                 n_estimators=self.config.n_estimators,
                 learning_rate=self.config.learning_rate,
                 max_depth=self.config.max_depth,
+                subsample=min(1.0, self.config.subsample),
                 random_state=self.config.random_state,
-                verbosity=0,
             )
-        except Exception:
-            pass
-
-        # Standard Scikit-Learn Gradient Boosting Regressor (100% pure Python/C wheel, zero dylib issues)
-        from sklearn.ensemble import GradientBoostingRegressor
-        return GradientBoostingRegressor(
-            n_estimators=self.config.n_estimators,
-            learning_rate=self.config.learning_rate,
-            max_depth=self.config.max_depth,
-            subsample=min(1.0, self.config.subsample),
-            random_state=self.config.random_state,
-        )
+        else:
+            raise ValueError(
+                f"Unknown backend '{self.config.backend}'. Must be 'sklearn', 'lightgbm', or 'xgboost'."
+            )
 
     def fit(self, X: pd.DataFrame, y: pd.DataFrame) -> GradientBoostedFactorForecaster:
         """Fit specialized regressors for Level, Slope, and Curvature."""
         self.feature_names_ = list(X.columns)
+        self.backend_name_ = self.config.backend.lower()
 
         for target_col in ["target_dLevel", "target_dSlope", "target_dCurvature"]:
             model = self._init_model()
-            model.fit(X.values, y[target_col].values)
+            valid = y[target_col].notna()
+            model.fit(X.loc[valid].values, y.loc[valid, target_col].values)
             self.models[target_col] = model
 
         self._is_fitted = True
@@ -386,12 +400,18 @@ def run_ml_factor_forecasting(
     )
     logger.info("Constructed feature panel: %d dates with %d engineered features.", len(X), len(feature_cols))
 
-    # Chronological train/test split
+    # Chronological train/test split with strict causal training boundary
     split_idx = int(len(X) * train_split_ratio)
-    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+    training_cutoff = X.index[split_idx - 1]
+    X_train, y_train = FactorFeatureEngineer.get_training_slice(X, y, training_cutoff)
+    X_test = X.iloc[split_idx:].copy()
+    y_test = y.iloc[split_idx:].copy()
 
-    logger.info("Fitting GradientBoostedFactorForecaster on training slice (%d observations)...", len(X_train))
+    logger.info(
+        "Fitting GradientBoostedFactorForecaster on causal training slice (%d observations <= %s)...",
+        len(X_train),
+        training_cutoff.strftime("%Y-%m-%d"),
+    )
     forecaster = GradientBoostedFactorForecaster(config=config)
     forecaster.fit(X_train, y_train)
 
@@ -400,11 +420,28 @@ def run_ml_factor_forecasting(
     f_pred = forecaster.forecast_factors(X_test, test_factors)
     increments_pred = forecaster.predict_increments(X_test)
 
-    # In-sample & Out-of-sample RMSE (in basis points, 1 bp = 0.01)
+    # Out-of-sample evaluation: evaluate Fhat[t+1|t] against actual observation at t+1
+    eval_mask = y_test["target_dSlope"].notna()
+    X_test_eval = X_test.loc[eval_mask]
+    y_test_eval = y_test.loc[eval_mask]
+    f_pred_eval = f_pred.loc[eval_mask]
+    inc_pred_eval = increments_pred.loc[eval_mask]
+
+    # Model RMSEs in basis points (1 bp = 0.01 percentage point)
     rmse_bp = {
-        "dLevel": float(np.sqrt(np.mean((y_test["target_dLevel"] - increments_pred["dLevel_hat"]) ** 2)) * 100.0),
-        "dSlope": float(np.sqrt(np.mean((y_test["target_dSlope"] - increments_pred["dSlope_hat"]) ** 2)) * 100.0),
-        "dCurvature": float(np.sqrt(np.mean((y_test["target_dCurvature"] - increments_pred["dCurvature_hat"]) ** 2)) * 100.0),
+        "Level": float(np.sqrt(np.mean((y_test_eval["target_Level"] - f_pred_eval["level_hat"]) ** 2)) * 100.0),
+        "Slope": float(np.sqrt(np.mean((y_test_eval["target_Slope"] - f_pred_eval["slope_hat"]) ** 2)) * 100.0),
+        "Curvature": float(np.sqrt(np.mean((y_test_eval["target_Curvature"] - f_pred_eval["curvature_hat"]) ** 2)) * 100.0),
+        "dLevel": float(np.sqrt(np.mean((y_test_eval["target_dLevel"] - inc_pred_eval["dLevel_hat"]) ** 2)) * 100.0),
+        "dSlope": float(np.sqrt(np.mean((y_test_eval["target_dSlope"] - inc_pred_eval["dSlope_hat"]) ** 2)) * 100.0),
+        "dCurvature": float(np.sqrt(np.mean((y_test_eval["target_dCurvature"] - inc_pred_eval["dCurvature_hat"]) ** 2)) * 100.0),
+    }
+
+    # Matching Random Walk benchmark on identical targets (Fhat_RW[t+1|t] = F[t])
+    rw_rmse_bp = {
+        "Level": float(np.sqrt(np.mean((y_test_eval["target_Level"] - X_test_eval["level_t0"]) ** 2)) * 100.0),
+        "Slope": float(np.sqrt(np.mean((y_test_eval["target_Slope"] - X_test_eval["slope_t0"]) ** 2)) * 100.0),
+        "Curvature": float(np.sqrt(np.mean((y_test_eval["target_Curvature"] - X_test_eval["curvature_t0"]) ** 2)) * 100.0),
     }
 
     logger.info("Computing TreeSHAP values for all factor models...")
@@ -413,6 +450,7 @@ def run_ml_factor_forecasting(
     return {
         "forecaster": forecaster,
         "feature_names": feature_cols,
+        "training_cutoff": training_cutoff,
         "X_train": X_train,
         "X_test": X_test,
         "y_train": y_train,
@@ -420,5 +458,6 @@ def run_ml_factor_forecasting(
         "f_pred": f_pred,
         "increments_pred": increments_pred,
         "rmse_bp": rmse_bp,
+        "rw_rmse_bp": rw_rmse_bp,
         "shap_data": shap_data,
     }
