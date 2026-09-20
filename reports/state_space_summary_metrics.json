@@ -1,0 +1,112 @@
+{
+  "scorecard": {
+    "In-Sample Fit (Mean Cross-Sectional RMSE)": {
+      "Two-Step OLS": "10.50 bps",
+      "Kalman Filtered": "13.06 bps",
+      "Kalman Smoothed": "13.06 bps",
+      "Winner / Note": "Two-Step OLS wins on pure in-sample cross-sectional fit (unconstrained)"
+    },
+    "Factor Stability: Std(Delta Level)": {
+      "Two-Step OLS": "0.0603",
+      "Kalman Filtered": "0.0504",
+      "Kalman Smoothed": "0.0431",
+      "Winner / Note": "Kalman Smoother reduces level factor daily volatility"
+    },
+    "Factor Stability: Std(Delta Slope)": {
+      "Two-Step OLS": "0.0756",
+      "Kalman Filtered": "0.0649",
+      "Kalman Smoothed": "0.0551",
+      "Winner / Note": "Kalman Smoother dampens slope jumps"
+    },
+    "Factor Stability: Std(Delta Curvature)": {
+      "Two-Step OLS": "0.1729",
+      "Kalman Filtered": "0.1557",
+      "Kalman Smoothed": "0.1436",
+      "Winner / Note": "Kalman Filter & Smoother dramatically suppress curvature noise/chatter"
+    },
+    "Residual Autocorrelation (Lag 1)": {
+      "Two-Step OLS": "0.972",
+      "Kalman Filtered": "0.785",
+      "Kalman Smoothed": "0.662",
+      "Winner / Note": "Both show persistent serial correlation (neither is pure white noise)"
+    },
+    "1-Day Ahead Forecast RMSE": {
+      "Two-Step OLS": "12.87 bps",
+      "Kalman Filtered": "15.3 bps",
+      "Random Walk": "5.32 bps",
+      "Winner / Note": "Random Walk benchmark is near parity with 1-day forecasts"
+    },
+    "5-Day Ahead Forecast RMSE": {
+      "Two-Step OLS": "16.14 bps",
+      "Kalman Filtered": "18.16 bps",
+      "Random Walk": "11.49 bps",
+      "Winner / Note": "Random Walk remains a highly competitive baseline"
+    },
+    "21-Day (1-Mo) Ahead Forecast RMSE": {
+      "Two-Step OLS": "25.58 bps",
+      "Kalman Filtered": "27.61 bps",
+      "Random Walk": "23.96 bps",
+      "Winner / Note": "State-space mean reversion begins to exhibit value over longer horizons"
+    }
+  },
+  "mean_ols_rmse_bp": 10.495455902786627,
+  "mean_kf_filt_rmse_bp": 13.059038004050223,
+  "mean_kf_smooth_rmse_bp": 13.062325262915492,
+  "volatility": {
+    "ols": {
+      "level": 0.060255250520438584,
+      "slope": 0.07558674866840467,
+      "curvature": 0.17289039459123134
+    },
+    "kalman_filtered": {
+      "level": 0.05042882829467224,
+      "slope": 0.06488397602295051,
+      "curvature": 0.15574169188317039
+    },
+    "kalman_smoothed": {
+      "level": 0.043080013488522376,
+      "slope": 0.055133646723653625,
+      "curvature": 0.1435606526912597
+    }
+  },
+  "whiteness": {
+    "ols": {
+      "autocorr_lag1": 0.9717674785295306,
+      "autocorr_lag5": 0.910486392053074,
+      "ljung_box_pvalue_lag5": 0.0
+    },
+    "kalman_filtered": {
+      "autocorr_lag1": 0.7845977287889562,
+      "autocorr_lag5": 0.6848132734850323,
+      "ljung_box_pvalue_lag5": 4.566072432378384e-78
+    },
+    "kalman_smoothed": {
+      "autocorr_lag1": 0.6624756137020015,
+      "autocorr_lag5": 0.679596466582609,
+      "ljung_box_pvalue_lag5": 4.216605068549881e-10
+    }
+  },
+  "forecasting": {
+    "h_1": {
+      "horizon_days": 1,
+      "random_walk_rmse_bp": 5.32,
+      "ols_var_rmse_bp": 12.87,
+      "kalman_filter_rmse_bp": 15.3,
+      "kalman_vs_rw_gain_bp": -9.97
+    },
+    "h_5": {
+      "horizon_days": 5,
+      "random_walk_rmse_bp": 11.49,
+      "ols_var_rmse_bp": 16.14,
+      "kalman_filter_rmse_bp": 18.16,
+      "kalman_vs_rw_gain_bp": -6.67
+    },
+    "h_21": {
+      "horizon_days": 21,
+      "random_walk_rmse_bp": 23.96,
+      "ols_var_rmse_bp": 25.58,
+      "kalman_filter_rmse_bp": 27.61,
+      "kalman_vs_rw_gain_bp": -3.65
+    }
+  }
+}
