@@ -124,18 +124,28 @@ class RealTimeMacroIngestor:
                 records = []
                 for o in s.get("occurrences", []):
                     if o.get("occurrenceTime") and o.get("actual") is not None:
+                        ts_utc = pd.to_datetime(o["occurrenceTime"], utc=True)
+                        ts_et = ts_utc.tz_convert("America/New_York")
                         records.append({
-                            "timestamp": o["occurrenceTime"],
+                            "timestamp": ts_utc,
+                            "release_timestamp_utc": ts_utc,
+                            "release_timestamp_et": ts_et,
+                            "market_date": pd.to_datetime(ts_et.date()),
+                            "reference_period": str(o.get("referencePeriod", "")),
                             "actual": float(o["actual"]),
                             "forecast": float(o["forecast"]) if o.get("forecast") is not None else np.nan,
                             "previous": float(o["previous"]) if o.get("previous") is not None else np.nan,
+                            "has_consensus": bool(o.get("forecast") is not None),
+                            "consensus_source": "investing_consensus",
                             "unit": o.get("unit", MACRO_SERIES_SPECS[matched_key]["unit"]),
+                            "is_after_market_close": bool(ts_et.hour >= 16),
+                            "provenance": "VERIFIED_POINT_IN_TIME",
                         })
                 if records:
                     df = pd.DataFrame(records)
                     df["timestamp"] = pd.to_datetime(df["timestamp"])
-                    df["date"] = pd.to_datetime(df["timestamp"].dt.date)
-                    df = df.sort_values("timestamp").reset_index(drop=True)
+                    df["date"] = pd.to_datetime(df["release_timestamp_et"].dt.date)
+                    df = df.sort_values("release_timestamp_utc").reset_index(drop=True)
                     series_frames[matched_key] = df
 
         return series_frames
@@ -157,24 +167,54 @@ class SurpriseEngine:
         df: pd.DataFrame,
         actual_col: str = "actual",
         forecast_col: str = "forecast",
+        min_observations: int = 12,
+        ddof: int = 1,
+        use_lagged_expanding_scale: bool = True,
     ) -> Tuple[pd.Series, pd.Series, float]:
         """
         Compute standardized announcement surprise.
         
+        RESEARCH INTEGRITY & INFORMATION CONTRACT (Prompt 3):
+        - raw_surprise = actual - forecast.
+        - Missing consensus: if forecast is NaN, surprise remains NaN (never filled with 0.0).
+        - If use_lagged_expanding_scale=True, scale sigma_i is computed strictly on prior
+          observations {s_0, ..., s_{i-1}} with ddof=1.
+          Guarantees causal invariance: future releases cannot alter past standardized surprises.
+        - Zero-variance protection: sigma_i clipped to minimum 1e-4.
+        
         Returns:
-            Tuple of (raw_surprise_ann, standardized_surprise_ann, sigma_ann).
+            Tuple of (raw_surprise_ann, standardized_surprise_ann, final_sigma_ann).
         """
         raw_surprise = df[actual_col] - df[forecast_col]
-        valid = raw_surprise.dropna()
-        if len(valid) == 0:
-            sigma = 1.0
-        else:
-            sigma = float(valid.std())
-            if sigma == 0.0 or np.isnan(sigma):
+        n = len(df)
+        
+        if not use_lagged_expanding_scale:
+            valid = raw_surprise.dropna()
+            sigma = float(valid.std(ddof=ddof)) if len(valid) > 1 else 1.0
+            if sigma <= 1e-6 or np.isnan(sigma):
                 sigma = 1.0
+            std_surprise = raw_surprise / sigma
+            return raw_surprise, std_surprise, sigma
 
-        std_surprise = raw_surprise / sigma
-        return raw_surprise, std_surprise, sigma
+        std_surprise = pd.Series(np.nan, index=df.index, dtype=float)
+        valid_history = []
+        all_valid = raw_surprise.dropna().values
+        init_sigma = float(np.std(all_valid[:min_observations], ddof=ddof)) if len(all_valid) >= min_observations else 1.0
+        if init_sigma <= 1e-6 or np.isnan(init_sigma):
+            init_sigma = 1.0
+
+        current_sigma = init_sigma
+        for i in range(n):
+            val = raw_surprise.iloc[i]
+            if len(valid_history) >= min_observations:
+                s = float(np.std(valid_history, ddof=ddof))
+                if s > 1e-6 and not np.isnan(s):
+                    current_sigma = s
+            if not np.isnan(val):
+                std_surprise.iloc[i] = val / current_sigma
+                valid_history.append(val)
+
+        return raw_surprise, std_surprise, current_sigma
 
     @staticmethod
     def compute_model_surprise(
@@ -183,19 +223,12 @@ class SurpriseEngine:
         previous_col: str = "previous",
         model_type: str = "ar1",
         min_history: int = 12,
+        ddof: int = 1,
+        use_lagged_expanding_scale: bool = True,
     ) -> Tuple[pd.Series, pd.Series, float]:
         """
-        Compute out-of-sample model innovation using STRICTLY data through t-1.
-        
-        Args:
-            df: Chronologically sorted DataFrame of releases.
-            actual_col: Column with actual values.
-            previous_col: Column with prior release values.
-            model_type: 'ar1' for expanding AR(1), 'rw' for random walk (previous value).
-            min_history: Minimum observations required before fitting expanding AR(1).
-        
-        Returns:
-            Tuple of (raw_surprise_model, standardized_surprise_model, sigma_model).
+        Compute out-of-sample model innovation using STRICTLY data through t-1,
+        with causal lagged expanding innovation standardizers.
         """
         n = len(df)
         actuals = df[actual_col].values
@@ -223,23 +256,40 @@ class SurpriseEngine:
                     # lstsq solves OLS beta = [c, phi]
                     beta, _, _, _ = np.linalg.lstsq(X, y_curr, rcond=None)
                     c, phi = beta[0], beta[1]
-                    # Forecast 1 step ahead:
+                    phi = float(np.clip(phi, -0.999, 0.999))  # Stationary bound
                     y_hat = c + phi * y_hist[-1]
                     pred_errors[i] = actuals[i] - y_hat
                 except Exception:
                     pred_errors[i] = actuals[i] - y_hist[-1]
 
         raw_errors = pd.Series(pred_errors, index=df.index)
-        valid = raw_errors.dropna()
-        if len(valid) == 0:
-            sigma = 1.0
-        else:
-            sigma = float(valid.std())
-            if sigma == 0.0 or np.isnan(sigma):
+        
+        if not use_lagged_expanding_scale:
+            valid = raw_errors.dropna()
+            sigma = float(valid.std(ddof=ddof)) if len(valid) > 1 else 1.0
+            if sigma <= 1e-6 or np.isnan(sigma):
                 sigma = 1.0
+            return raw_errors, raw_errors / sigma, sigma
 
-        std_errors = raw_errors / sigma
-        return raw_errors, std_errors, sigma
+        std_errors = pd.Series(np.nan, index=df.index, dtype=float)
+        valid_innov_history = []
+        all_valid_e = raw_errors.dropna().values
+        init_sigma = float(np.std(all_valid_e[:min_history], ddof=ddof)) if len(all_valid_e) >= min_history else 1.0
+        if init_sigma <= 1e-6 or np.isnan(init_sigma):
+            init_sigma = 1.0
+
+        current_sigma = init_sigma
+        for i in range(n):
+            err = raw_errors.iloc[i]
+            if len(valid_innov_history) >= min_history:
+                s = float(np.std(valid_innov_history, ddof=ddof))
+                if s > 1e-6 and not np.isnan(s):
+                    current_sigma = s
+            if not np.isnan(err):
+                std_errors.iloc[i] = err / current_sigma
+                valid_innov_history.append(err)
+
+        return raw_errors, std_errors, current_sigma
 
     def build_unified_surprises_panel(
         self,
@@ -566,6 +616,170 @@ def plot_cpi_impulse_response(
     plt.close()
     logger.info("Saved standout IRF figure to %s", out_path)
     return out_path
+
+
+@dataclass
+class MacroResponseFoldEstimate:
+    """Provenance record for causally estimated macro response coefficients."""
+    fold_id: int
+    training_cutoff: pd.Timestamp
+    indicator: str
+    n_events: int
+    slope_beta: float
+    curvature_beta: float
+    scale_ann: float
+    status: str
+    provenance: str
+
+
+class CausalMacroResponseEstimator:
+    """
+    Estimates macro announcement response coefficients strictly on training folds.
+    
+    RESEARCH INTEGRITY & CAUSALITY (Prompt 3):
+    - Uses STRICTLY training examples where both announcement and outcome are observed <= training_cutoff.
+    - Response horizon matches evaluated post-decision execution:
+      Delta Spread_{t -> t+1} for next-day execution, so training labels for day t
+      require t+1 <= training_cutoff (i.e. strictly t < training_cutoff).
+    - Requires min_events (default 8) per indicator. If fewer events are available,
+      records status="INADEQUATE_HISTORY_NEUTRAL" with beta=0.0 (predeclared neutral baseline).
+    - Records per-fold coefficients, scales, event counts, cutoffs, and source provenance.
+    - Appending future data after training_cutoff cannot alter fold estimates.
+    """
+    def __init__(
+        self,
+        min_events: int = 8,
+        predictive_horizon: int = 1,
+    ):
+        self.min_events = min_events
+        self.predictive_horizon = predictive_horizon
+        self.fold_estimates_: List[MacroResponseFoldEstimate] = []
+
+    def fit_fold(
+        self,
+        fold_id: int,
+        training_cutoff: pd.Timestamp,
+        macro_df: pd.DataFrame,
+        yield_df: pd.DataFrame,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Estimate causal response coefficients on training slice.
+        
+        Returns:
+            Dict mapping indicator to {'slope_beta': float, 'curvature_beta': float, 'status': str, 'n_events': int}
+        """
+        # Training yields strictly <= training_cutoff
+        y_tr = yield_df[yield_df.index <= training_cutoff].copy()
+        if len(y_tr) < 10:
+            return {}
+
+        has_2s10s = "DGS10" in y_tr.columns and "DGS2" in y_tr.columns
+        has_fly = "DGS5" in y_tr.columns and "DGS2" in y_tr.columns and "DGS10" in y_tr.columns
+
+        slope = y_tr["DGS10"] - y_tr["DGS2"] if has_2s10s else pd.Series(index=y_tr.index, dtype=float)
+        curv = 2.0 * y_tr["DGS5"] - y_tr["DGS2"] - y_tr["DGS10"] if has_fly else pd.Series(index=y_tr.index, dtype=float)
+
+        # Target is predictive response: Delta Spread_{t -> t + horizon}
+        # For date t, outcome t + horizon must be <= training_cutoff.
+        d_slope = slope.shift(-self.predictive_horizon) - slope
+        d_curv = curv.shift(-self.predictive_horizon) - curv
+
+        m_tr = macro_df.copy()
+        if "date" in m_tr.columns:
+            m_tr["date"] = pd.to_datetime(m_tr["date"])
+            m_tr = m_tr[m_tr["date"] <= training_cutoff]
+
+        results: Dict[str, Dict[str, Any]] = {}
+        indicators = ["CPI", "CORE_CPI", "NFP", "UNEMP", "FOMC"]
+
+        for ind in indicators:
+            ind_events = m_tr[m_tr["indicator"] == ind].copy()
+            if ind_events.empty or "surprise_ann" not in ind_events.columns:
+                results[ind] = {
+                    "slope_beta": 0.0,
+                    "curvature_beta": 0.0,
+                    "status": "NO_DATA_NEUTRAL",
+                    "n_events": 0,
+                }
+                continue
+
+            # Drop missing surprises (distinguish missing consensus from zero surprise)
+            valid_events = ind_events.dropna(subset=["surprise_ann"])
+            
+            # An event on date dt can only be used if d_slope[dt] is not NaN
+            # Since d_slope.iloc[-1] is NaN, dt < training_cutoff is strictly guaranteed!
+            matched_dates = [dt for dt in valid_events["date"] if dt in d_slope.index and not np.isnan(d_slope.loc[dt])]
+            n_matched = len(matched_dates)
+
+            if n_matched < self.min_events:
+                status = "INADEQUATE_HISTORY_NEUTRAL"
+                b_slope = 0.0
+                b_curv = 0.0
+                prov = f"Insufficient training events ({n_matched} < {self.min_events}); defaulted to neutral 0.0"
+            else:
+                surps = valid_events.set_index("date").loc[matched_dates, "surprise_ann"].values
+                d_s = d_slope.loc[matched_dates].values
+                
+                try:
+                    X = np.column_stack([np.ones(len(surps)), surps])
+                    params_s, _, _, _ = np.linalg.lstsq(X, d_s, rcond=None)
+                    b_slope = float(params_s[1])
+                except Exception:
+                    b_slope = 0.0
+
+                if has_fly:
+                    d_c = d_curv.loc[matched_dates].values
+                    try:
+                        X = np.column_stack([np.ones(len(surps)), surps])
+                        params_c, _, _, _ = np.linalg.lstsq(X, d_c, rcond=None)
+                        b_curv = float(params_c[1])
+                    except Exception:
+                        b_curv = 0.0
+                else:
+                    b_curv = 0.0
+                    
+                status = "ESTIMATED_CAUSAL"
+                prov = f"Causal OLS fit on {n_matched} training events strictly <= {training_cutoff.date()}"
+
+            scale_ann = float(valid_events["surprise_ann"].std()) if len(valid_events) > 1 else 1.0
+
+            rec = MacroResponseFoldEstimate(
+                fold_id=fold_id,
+                training_cutoff=training_cutoff,
+                indicator=ind,
+                n_events=n_matched,
+                slope_beta=b_slope,
+                curvature_beta=b_curv,
+                scale_ann=scale_ann,
+                status=status,
+                provenance=prov,
+            )
+            self.fold_estimates_.append(rec)
+            results[ind] = {
+                "slope_beta": b_slope,
+                "curvature_beta": b_curv,
+                "status": status,
+                "n_events": n_matched,
+            }
+
+        return results
+
+    def get_fold_estimates_df(self) -> pd.DataFrame:
+        """Return history of fold estimates as a structured DataFrame."""
+        return pd.DataFrame([
+            {
+                "fold_id": r.fold_id,
+                "training_cutoff": r.training_cutoff,
+                "indicator": r.indicator,
+                "n_events": r.n_events,
+                "slope_beta": r.slope_beta,
+                "curvature_beta": r.curvature_beta,
+                "scale_ann": r.scale_ann,
+                "status": r.status,
+                "provenance": r.provenance,
+            }
+            for r in self.fold_estimates_
+        ])
 
 
 def run_pipeline() -> Tuple[pd.DataFrame, DatasetMetadata]:

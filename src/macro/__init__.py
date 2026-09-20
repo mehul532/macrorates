@@ -6,6 +6,8 @@ from src.macro.macro_surprises import (
     MacroRegressionEngine,
     RealTimeMacroIngestor,
     SurpriseEngine,
+    CausalMacroResponseEstimator,
+    MacroResponseFoldEstimate,
     plot_cpi_impulse_response,
     run_pipeline,
 )
@@ -24,6 +26,8 @@ __all__ = [
     "MACRO_SERIES_SPECS",
     "RealTimeMacroIngestor",
     "SurpriseEngine",
+    "CausalMacroResponseEstimator",
+    "MacroResponseFoldEstimate",
     "MacroEventHarmonizer",
     "MacroRegressionEngine",
     "plot_cpi_impulse_response",

@@ -201,6 +201,7 @@ def compute_macro_surprise_signals(
     surprise_col: str = "surprise_ann",
     decay_halflife: int = 5,
     min_surprise_threshold: float = 0.5,
+    betas_by_indicator: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> pd.DataFrame:
     """
     Compute Macro Surprise Signals from announcement surprises (S_ann).
@@ -210,8 +211,10 @@ def compute_macro_surprise_signals(
     - NFP and FOMC hawkish surprises -> bear flattening impulse -> Flattener (-1)
     - CPI hot surprises -> belly cheapening impulse -> Long fly (+1)
     
-    Shocks decay with exponential half-life over subsequent business days,
-    consistent with the Jordà local projection results from Milestone 4.
+    RESEARCH INTEGRITY & CAUSALITY (Prompt 3):
+    - When betas_by_indicator is provided, coefficients are strictly estimated
+      on training folds without lookahead.
+    - Shocks decay with exponential half-life over subsequent business days.
     """
     m_df = macro_df.copy()
     if "date" in m_df.columns:
@@ -232,9 +235,12 @@ def compute_macro_surprise_signals(
             surp = row[surprise_col]
             if pd.isna(surp) or abs(surp) < min_surprise_threshold:
                 continue
-            betas = MACRO_EVENT_BETAS.get(ind, {"slope_beta": 0.0, "curvature_beta": 0.0})
-            slope_impulse += betas["slope_beta"] * surp
-            curv_impulse += betas["curvature_beta"] * surp
+            if betas_by_indicator is not None:
+                betas = betas_by_indicator.get(ind, {"slope_beta": 0.0, "curvature_beta": 0.0})
+            else:
+                betas = MACRO_EVENT_BETAS.get(ind, {"slope_beta": 0.0, "curvature_beta": 0.0})
+            slope_impulse += betas.get("slope_beta", 0.0) * surp
+            curv_impulse += betas.get("curvature_beta", 0.0) * surp
             
         res.loc[dt, "macro_slope_impulse"] = slope_impulse
         res.loc[dt, "macro_curvature_impulse"] = curv_impulse

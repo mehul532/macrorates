@@ -31,8 +31,17 @@ def test_announcement_surprise_standardization():
 
     valid_std = std.dropna()
     assert abs(valid_std.mean()) < 0.1
-    assert abs(valid_std.std() - 1.0) < 0.05
+    assert abs(valid_std.std() - 1.0) < 0.10
     assert sigma > 0
+
+    # Retrospective full-sample mode produces exact unit sample variance
+    _, std_fs, _ = SurpriseEngine.compute_announcement_surprise(df, use_lagged_expanding_scale=False)
+    assert abs(std_fs.dropna().std() - 1.0) < 0.05
+
+    # Causal invariance: appending future extreme shock cannot alter past standardized surprises
+    df_ext = pd.concat([df, pd.DataFrame({"actual": [1000.0], "forecast": [0.0]})], ignore_index=True)
+    _, std_ext, _ = SurpriseEngine.compute_announcement_surprise(df_ext)
+    np.testing.assert_allclose(std.dropna().values, std_ext.iloc[:len(df)].dropna().values)
 
 
 def test_model_surprise_zero_lookahead():

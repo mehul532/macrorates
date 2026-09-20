@@ -45,6 +45,7 @@ from src.state_space.state_space import (
 from src.strategy.portfolio import allocate_2s10s_spread, allocate_2s5s10s_butterfly, compute_continuous_positions
 from src.strategy.backtest import RelativeValueBacktestEngine, CostModelV1Config, BacktestResult
 from src.backtest.contracts import ForecastRecord, ForecastLedger, ForecastStatus
+from src.macro.macro_surprises import CausalMacroResponseEstimator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -370,15 +371,27 @@ class WalkForwardHarness:
             if "2s5s10s" in spreads_kf and "2s5s10s" in spreads_act:
                 fly_2s5s10s_sq_errors["DNS_Kalman_Macro"].extend(((spreads_act["2s5s10s"] - spreads_kf["2s5s10s"]) ** 2).flatten())
                 
+            # Prompt 3: Estimate causal macro response coefficients strictly on training slice
+            macro_estimator = CausalMacroResponseEstimator(min_events=8, predictive_horizon=1)
+            fold_macro_betas = macro_estimator.fit_fold(
+                fold_id=f_idx,
+                training_cutoff=train_dates[-1],
+                macro_df=self.macro_df,
+                yield_df=y_train,
+            )
+            
             macro_sub = self.macro_df[
                 (self.macro_df["date"] >= test_dates[0]) & (self.macro_df["date"] <= test_dates[-1])
             ]
             macro_impulse = pd.Series(0.0, index=test_dates)
             for _, m_row in macro_sub.iterrows():
                 dt = m_row["date"]
-                surp = m_row.get("surprise_ann", 0.0)
+                ind = m_row.get("indicator")
+                surp = m_row.get("surprise_ann", np.nan)
                 if pd.notna(surp) and dt in macro_impulse.index:
-                    macro_impulse.loc[dt] += -0.5 * np.clip(surp, -2.0, 2.0)
+                    b_info = fold_macro_betas.get(ind, {"slope_beta": 0.0})
+                    b_slope = b_info.get("slope_beta", 0.0)
+                    macro_impulse.loc[dt] += b_slope * np.clip(surp, -2.0, 2.0)
             
             sig_macro_dns = np.clip(0.6 * sig_kf + 0.4 * macro_impulse, -1.0, 1.0)
             oos_signals["DNS_Kalman_Macro"].append(sig_macro_dns)
