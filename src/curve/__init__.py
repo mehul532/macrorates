@@ -7,15 +7,27 @@ from src.curve.curve import (
     fit_pca,
     fit_static_nelson_siegel,
 )
-from src.curve.nelson_siegel import NelsonSiegelFit, StaticNelsonSiegel, nelson_siegel_loadings
-from src.curve.pca import PCAResult, YieldCurvePCA
+from src.curve.nelson_siegel import NelsonSiegelFit, StaticNelsonSiegel, nelson_siegel_loadings, NelsonSiegelAR1Forecaster
+from src.curve.pca import PCAResult, YieldCurvePCA, PCAVARForecaster
 from src.curve.svensson import SvenssonCurve, SvenssonFit, svensson_loadings, compute_aic_bic
+from src.curve.canonical import (
+    CANONICAL_TENORS,
+    CORE_BENCHMARK_TENORS,
+    get_canonical_maturities,
+    compute_observable_spreads,
+)
 
 __all__ = [
+    "CANONICAL_TENORS",
+    "CORE_BENCHMARK_TENORS",
+    "get_canonical_maturities",
+    "compute_observable_spreads",
     "YieldCurvePCA",
     "PCAResult",
+    "PCAVARForecaster",
     "StaticNelsonSiegel",
     "NelsonSiegelFit",
+    "NelsonSiegelAR1Forecaster",
     "SvenssonCurve",
     "SvenssonFit",
     "nelson_siegel_loadings",

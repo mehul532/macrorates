@@ -184,3 +184,111 @@ class StaticNelsonSiegel:
                 })
 
         return pd.DataFrame(records)
+
+
+class NelsonSiegelAR1Forecaster:
+    """
+    Rolling one-step Nelson-Siegel AR(1) term structure forecaster.
+    
+    RESEARCH INTEGRITY & INFORMATION CONTRACT:
+    - Predeclared or training-only lambda.
+    - Estimates OLS cross-sectional factors solely on training slice y_train.
+    - Estimates stationary AR(1) dynamics on training factor time series.
+    - Sequential OOS propagation: At step k, predicts target k from information at k-1,
+      then observes target k to update state for step k+1.
+    - Fixed parameters throughout the evaluation fold.
+    """
+    
+    def __init__(self, lambda_param: float = 0.7308):
+        self.lambda_param = lambda_param
+        self.static_ns = StaticNelsonSiegel(lambda_param=lambda_param)
+        self.mu_: Optional[np.ndarray] = None
+        self.a_diag_: Optional[np.ndarray] = None
+        self.c_: Optional[np.ndarray] = None
+        self.last_train_factors_: Optional[np.ndarray] = None
+        self.maturities_: Optional[np.ndarray] = None
+        self.loadings_: Optional[np.ndarray] = None
+
+    def fit(self, y_train: np.ndarray, maturities: np.ndarray) -> "NelsonSiegelAR1Forecaster":
+        """
+        Fit factor loadings, historical factor series, and AR(1) dynamics strictly on training yields.
+        """
+        self.maturities_ = np.asarray(maturities, dtype=float)
+        self.loadings_ = nelson_siegel_loadings(self.maturities_, self.lambda_param)
+        T, N = y_train.shape
+        
+        # Fit OLS factor for each training date
+        factors_tr = np.zeros((T, 3))
+        for t in range(T):
+            y_t = y_train[t]
+            mask = ~np.isnan(y_t)
+            if np.sum(mask) >= 3:
+                beta, _, _, _ = np.linalg.lstsq(self.loadings_[mask], y_t[mask], rcond=None)
+                factors_tr[t] = beta
+            else:
+                factors_tr[t] = factors_tr[t - 1] if t > 0 else np.array([4.0, -1.0, 1.0])
+                
+        self.last_train_factors_ = factors_tr[-1].copy()
+        
+        # Fit stationary AR(1) on training factor deviations
+        mu = np.mean(factors_tr, axis=0)
+        factors_dm = factors_tr - mu
+        X_lag = factors_dm[:-1]
+        Y_lead = factors_dm[1:]
+        
+        a_diag = []
+        for i in range(3):
+            denom = float(np.sum(X_lag[:, i] ** 2))
+            a_i = float(np.sum(X_lag[:, i] * Y_lead[:, i]) / denom) if denom > 0 else 0.95
+            a_diag.append(float(np.clip(a_i, -0.999, 0.999)))
+            
+        self.mu_ = mu
+        self.a_diag_ = np.array(a_diag)
+        self.c_ = mu * (1.0 - self.a_diag_)
+        self.factors_tr_ = factors_tr
+        self.train_slope_std_ = float(np.std(factors_tr[:, 1])) + 1e-6
+        return self
+
+    def sequential_predict_and_update(
+        self,
+        y_test: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Sequentially forecast 1-step curve and factors across test observations.
+        
+        Returns:
+          y_pred: (K, N) predicted yield curves
+          factors_pred: (K, 3) 1-step predicted factor state
+          factors_obs: (K, 3) observed OLS factors after receiving y_test
+        """
+        if self.loadings_ is None or self.last_train_factors_ is None or self.c_ is None:
+            raise ValueError("Forecaster must be fit before forecasting.")
+            
+        K, N = y_test.shape
+        y_pred = np.zeros((K, N))
+        factors_pred = np.zeros((K, 3))
+        factors_obs = np.zeros((K, 3))
+        
+        f_curr = self.last_train_factors_.copy()
+        
+        for k in range(K):
+            # 1. 1-step forecast from information through k-1
+            f_p = self.c_ + self.a_diag_ * f_curr
+            y_p = self.loadings_ @ f_p
+            
+            y_pred[k] = y_p
+            factors_pred[k] = f_p
+            
+            # 2. Observe y_test[k] and update factor state
+            y_k = y_test[k]
+            mask = ~np.isnan(y_k)
+            if np.sum(mask) >= 3:
+                beta, _, _, _ = np.linalg.lstsq(self.loadings_[mask], y_k[mask], rcond=None)
+                f_curr = beta
+            else:
+                f_curr = f_p
+                
+            factors_obs[k] = f_curr
+            
+        return y_pred, factors_pred, factors_obs
+

@@ -123,3 +123,91 @@ class YieldCurvePCA:
             scores=scores_df,
             on_changes=on_changes,
         )
+
+
+class PCAVARForecaster:
+    """
+    Rolling one-step PCA / VAR(1) term structure forecaster.
+    
+    RESEARCH INTEGRITY & INFORMATION CONTRACT:
+    - Fits PCA mean vector, loadings V, and VAR(1) strictly on training yields y_train.
+    - Sequential OOS propagation:
+      At step k, forecasts score z_hat_k from z_{k-1}, reconstructs curve y_hat_k = mu + z_hat_k @ V.T.
+      Then observes y_test[k], computes z_k = (y_test[k] - mu) @ V.
+    - Fixed parameters throughout the evaluation fold.
+    """
+    
+    def __init__(self, n_components: int = 3):
+        self.n_components = n_components
+        self.pca_model = YieldCurvePCA(n_components=n_components)
+        self.pca_res_: Optional[PCAResult] = None
+        self.var_intercept_: Optional[np.ndarray] = None
+        self.var_A_: Optional[np.ndarray] = None
+        self.last_train_score_: Optional[np.ndarray] = None
+
+    def fit(self, y_train_df: pd.DataFrame, maturities_dict: Dict[str, float], date_col: str = "date") -> "PCAVARForecaster":
+        """
+        Fit PCA decomposition and VAR(1) dynamics strictly on training observations.
+        """
+        self.pca_res_ = self.pca_model.fit(y_train_df, maturities_dict=maturities_dict, date_col=date_col)
+        scores = self.pca_res_.scores.drop(columns=[date_col]).values
+        self.last_train_score_ = scores[-1].copy()
+        
+        # Fit VAR(1) on training PCA scores: z_t = c + A z_{t-1} + e_t
+        X_lag = scores[:-1]
+        Y_lead = scores[1:]
+        X_design = np.column_stack([np.ones(len(X_lag)), X_lag])
+        params, _, _, _ = np.linalg.lstsq(X_design, Y_lead, rcond=None)
+        
+        self.var_intercept_ = params[0]      # Shape (n_components,)
+        A_mat = params[1:].T                 # Shape (n_components, n_components)
+        eigvals = np.linalg.eigvals(A_mat)
+        max_eig = float(np.max(np.abs(eigvals)))
+        if max_eig >= 0.999:
+            A_mat = A_mat * (0.995 / max_eig)
+        self.var_A_ = A_mat
+        self.train_scores_ = scores
+        return self
+
+    def sequential_predict_and_update(self, y_test: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Sequentially forecast 1-step curve and PCA scores across test observations.
+        
+        Returns:
+          y_pred: (K, N) predicted yield curves
+          scores_pred: (K, n_components) 1-step predicted PCA scores
+          scores_obs: (K, n_components) observed PCA scores after projecting y_test
+        """
+        if self.pca_res_ is None or self.var_intercept_ is None or self.last_train_score_ is None:
+            raise ValueError("Forecaster must be fit before forecasting.")
+            
+        K, N = y_test.shape
+        y_pred = np.zeros((K, N))
+        scores_pred = np.zeros((K, self.n_components))
+        scores_obs = np.zeros((K, self.n_components))
+        
+        z_curr = self.last_train_score_.copy()
+        mu = self.pca_res_.mean_vector
+        V = self.pca_res_.loadings
+        
+        for k in range(K):
+            # 1. 1-step forecast from information through k-1
+            z_p = self.var_intercept_ + self.var_A_ @ z_curr
+            y_p = mu + z_p @ V.T
+            
+            y_pred[k] = y_p
+            scores_pred[k] = z_p
+            
+            # 2. Observe y_test[k] and project onto frozen training PCA loadings
+            y_k = y_test[k]
+            mask = ~np.isnan(y_k)
+            if np.all(mask):
+                z_curr = (y_k - mu) @ V
+            else:
+                y_fill = np.where(mask, y_k, y_p)
+                z_curr = (y_fill - mu) @ V
+                
+            scores_obs[k] = z_curr
+            
+        return y_pred, scores_pred, scores_obs
+

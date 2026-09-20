@@ -207,32 +207,38 @@ def test_decision_and_execution_timing_contract():
         )
 
 
-def test_walk_forward_harness_unavailable_models_nan():
-    """Verify that walk-forward harness outputs NaN for models pending genuine forecasts."""
+def test_walk_forward_harness_genuine_forecasts_and_unavailable_nan():
+    """Verify that walk-forward harness outputs genuine EVALUATED forecasts for models 1-5 and NaN for unavailable models."""
     yield_df = pd.read_parquet("data/processed/yield_panel.parquet").iloc[-850:]
     factor_df = pd.read_parquet("data/processed/factor_panel.parquet").iloc[-850:]
     macro_df = pd.read_parquet("data/processed/macro_surprises.parquet")
 
     cfg = WalkForwardConfig(train_window_days=756, refit_frequency_days=42)
     harness = WalkForwardHarness(yield_df, factor_df, macro_df, config=cfg)
+    # Clear ML feature panel to verify UNAVAILABLE handling on GBM
+    harness.X_ml = pd.DataFrame()
+    harness.y_ml = pd.DataFrame()
+
     eval_res = harness.run_walk_forward_evaluation(strategy_type="2s10s", max_folds=1)
 
     table = eval_res["baseline_table"]
     ledger = eval_res["forecast_ledger"]
 
-    # Random Walk has genuine evaluation
-    assert not np.isnan(table.loc["Random + Walk", "OOS Curve RMSE (bp)"])
-    assert table.loc["Random + Walk", "Forecast Status"] == "EVALUATED"
+    # Models 1-5 have genuine rolling one-step evaluations (Prompt 2)
+    genuine_models = ["Random + Walk", "PCA + VAR", "Static + NS", "DNS + Kalman", "DNS + Kalman + Macro"]
+    for m in genuine_models:
+        rmse = table.loc[m, "OOS Curve RMSE (bp)"]
+        assert not np.isnan(rmse), f"Expected numeric RMSE for genuine model {m}, got NaN"
+        assert rmse > 0.0, f"Expected positive RMSE for {m}, got {rmse}"
+        assert table.loc[m, "Forecast Status"] == "EVALUATED"
 
-    # Static NS, DNS Kalman, DNS Kalman Macro must be UNAVAILABLE (no artificial scaling)
-    for model_name in ["Static + NS", "DNS + Kalman", "DNS + Kalman + Macro"]:
-        assert np.isnan(table.loc[model_name, "OOS Curve RMSE (bp)"]), (
-            f"Model '{model_name}' must have NaN RMSE until genuine rolling forecast is implemented, "
-            f"got {table.loc[model_name, 'OOS Curve RMSE (bp)']}"
-        )
-        assert table.loc[model_name, "Forecast Status"] == "UNAVAILABLE"
+    # GBM without features must remain UNAVAILABLE with NaN RMSE
+    assert np.isnan(table.loc["GBM", "OOS Curve RMSE (bp)"]), (
+        f"Model 'GBM' without features must have NaN RMSE, got {table.loc['GBM', 'OOS Curve RMSE (bp)']}"
+    )
+    assert table.loc["GBM", "Forecast Status"] == "UNAVAILABLE"
 
-    # Ledger must contain explicit UNAVAILABLE records
-    unavailable_recs = [r for r in ledger.records if r.status == ForecastStatus.UNAVAILABLE]
-    assert len(unavailable_recs) > 0
-    assert all("Pending genuine rolling one-step forecast" in r.reason for r in unavailable_recs)
+    # Ledger must contain explicit UNAVAILABLE records for GBM
+    gbm_unavailable = [r for r in ledger.records if r.model_id == "GBM" and r.status == ForecastStatus.UNAVAILABLE]
+    assert len(gbm_unavailable) > 0
+    assert any("ML feature panel unavailable" in r.reason for r in gbm_unavailable)

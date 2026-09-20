@@ -28,9 +28,20 @@ import pandas as pd
 import statsmodels.api as sm
 from statsmodels.tsa.api import VAR
 
-from src.curve.nelson_siegel import StaticNelsonSiegel, NelsonSiegelFit, nelson_siegel_loadings
-from src.curve.pca import YieldCurvePCA
-from src.state_space.state_space import DynamicNelsonSiegelMLE, StateSpaceResults
+from src.curve.canonical import CANONICAL_TENORS, get_canonical_maturities, compute_observable_spreads
+from src.curve.nelson_siegel import (
+    StaticNelsonSiegel,
+    NelsonSiegelFit,
+    nelson_siegel_loadings,
+    NelsonSiegelAR1Forecaster,
+)
+from src.curve.pca import YieldCurvePCA, PCAVARForecaster
+from src.state_space.state_space import (
+    DynamicNelsonSiegelMLE,
+    KalmanFilterSmoother,
+    StateSpaceResults,
+    estimate_and_filter_state_space,
+)
 from src.strategy.portfolio import allocate_2s10s_spread, allocate_2s5s10s_butterfly, compute_continuous_positions
 from src.strategy.backtest import RelativeValueBacktestEngine, CostModelV1Config, BacktestResult
 from src.backtest.contracts import ForecastRecord, ForecastLedger, ForecastStatus
@@ -164,8 +175,12 @@ class WalkForwardHarness:
         ledger = ForecastLedger(run_id="walk_forward_evaluation")
         self.ledger = ledger
         
-        tenor_cols = [c for c in ["DGS1MO", "DGS3MO", "DGS6MO", "DGS1", "DGS2", "DGS3", "DGS5", "DGS7", "DGS10", "DGS20", "DGS30"] if c in self.yield_df.columns]
-        maturities = np.array([1/12, 3/12, 6/12, 1, 2, 3, 5, 7, 10, 20, 30][:len(tenor_cols)])
+        tenor_cols = [c for c in CANONICAL_TENORS.keys() if c in self.yield_df.columns]
+        maturities = get_canonical_maturities(tenor_cols)
+        mat_dict = {c: CANONICAL_TENORS[c] for c in tenor_cols}
+        
+        spread_2s10s_sq_errors = {m: [] for m in models}
+        fly_2s5s10s_sq_errors = {m: [] for m in models}
         
         for f_idx, (train_dates, test_dates) in enumerate(folds):
             # Define explicit rolling 1-step forecast origin-target pairs:
@@ -179,27 +194,26 @@ class WalkForwardHarness:
             # In-sample slices (STRICTLY <= train_dates[-1])
             y_train = self.yield_df.loc[train_dates, tenor_cols]
             y_test = self.yield_df.loc[test_dates, tenor_cols]
-            
-            f_train = self.factor_df.loc[train_dates, ["kf_level", "kf_slope", "kf_curvature"]]
-            f_test = self.factor_df.loc[test_dates, ["kf_level", "kf_slope", "kf_curvature"]]
+            spreads_act = compute_observable_spreads(y_test.values, tenor_cols)
             
             # --- MODEL 1: RANDOM WALK ---
-            # 1-step forecast is previous day's curve and factors
-            y_rw_pred = y_test.shift(1)
-            y_rw_pred.iloc[0] = y_train.iloc[-1]
-            curve_sq_errors["Random_Walk"].extend(((y_test - y_rw_pred) ** 2).values.flatten())
+            # 1-step forecast is previous day's curve
+            y_rw_pred = np.vstack([y_train.values[-1:], y_test.values[:-1]])
+            curve_sq_errors["Random_Walk"].extend(((y_test.values - y_rw_pred) ** 2).flatten())
             
-            f_rw_pred = f_test.shift(1)
-            f_rw_pred.iloc[0] = f_train.iloc[-1]
-            factor_sq_errors["Random_Walk"].extend(((f_test - f_rw_pred) ** 2).values.flatten())
-            # Random walk signal: flat / zero trade
+            spreads_rw = compute_observable_spreads(y_rw_pred, tenor_cols)
+            if "2s10s" in spreads_rw and "2s10s" in spreads_act:
+                spread_2s10s_sq_errors["Random_Walk"].extend(((spreads_act["2s10s"] - spreads_rw["2s10s"]) ** 2).flatten())
+                factor_sq_errors["Random_Walk"].extend(((spreads_act["2s10s"] - spreads_rw["2s10s"]) ** 2).flatten())
+            if "2s5s10s" in spreads_rw and "2s5s10s" in spreads_act:
+                fly_2s5s10s_sq_errors["Random_Walk"].extend(((spreads_act["2s5s10s"] - spreads_rw["2s5s10s"]) ** 2).flatten())
+                
             sig_rw = pd.Series(0.0, index=test_dates)
             oos_signals["Random_Walk"].append(sig_rw)
 
             # Record Random Walk in ForecastLedger
-            for orig_dt, tgt_dt in origin_target_pairs:
-                y_pred_val = y_train.loc[orig_dt] if orig_dt in y_train.index else y_test.loc[orig_dt]
-                for c in tenor_cols:
+            for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
+                for c_idx, c in enumerate(tenor_cols):
                     ledger.add_record(ForecastRecord(
                         run_id=ledger.run_id,
                         model_id="Random_Walk",
@@ -209,51 +223,74 @@ class WalkForwardHarness:
                         target_timestamp=tgt_dt,
                         target_type="yield_curve",
                         target_name=c,
-                        forecast=float(y_pred_val[c]),
-                        actual=float(y_test.loc[tgt_dt, c]),
+                        forecast=float(y_rw_pred[k, c_idx]),
+                        actual=float(y_test.iloc[k, c_idx]),
                         status=ForecastStatus.SCORED,
                     ))
             
             # --- MODEL 2: PCA / VAR(1) ---
-            mat_dict = {col: maturities[i] for i, col in enumerate(tenor_cols)}
-            pca_model = YieldCurvePCA(n_components=3)
-            y_train_df = y_train.copy()
-            y_train_df["date"] = train_dates
-            pca_res = pca_model.fit(y_train_df, maturities_dict=mat_dict)
-            pca_scores = pca_res.scores.drop(columns=["date"]).values
+            pca_forecaster = PCAVARForecaster(n_components=3)
+            y_train_pca_df = y_train.copy()
+            y_train_pca_df["date"] = train_dates
+            pca_forecaster.fit(y_train_pca_df, maturities_dict=mat_dict, date_col="date")
+            y_pred_pca, scores_pred_pca, scores_obs_pca = pca_forecaster.sequential_predict_and_update(y_test.values)
             
-            var_model = VAR(pca_scores)
-            var_res = var_model.fit(1)
-            
-            # Out-of-sample factor forecast
-            test_centered = y_test.values - pca_res.mean_vector
-            test_pca = test_centered @ pca_res.loadings
-            pca_pred_factors = var_res.forecast(test_pca, steps=len(test_dates))
-            pca_pred_curve = pca_res.mean_vector + pca_pred_factors @ pca_res.loadings.T
-            
-            curve_sq_errors["PCA_VAR"].extend(((y_test.values - pca_pred_curve) ** 2).flatten())
-            factor_sq_errors["PCA_VAR"].extend(((f_test.values - pca_pred_factors) ** 2).flatten())
-            
-            # Signal: mean-reversion of PCA slope (PC2)
-            slope_score = test_pca[:, 1]
-            z_pca = (slope_score - np.mean(pca_scores[:, 1])) / (np.std(pca_scores[:, 1]) + 1e-6)
+            curve_sq_errors["PCA_VAR"].extend(((y_test.values - y_pred_pca) ** 2).flatten())
+            spreads_pca = compute_observable_spreads(y_pred_pca, tenor_cols)
+            if "2s10s" in spreads_pca and "2s10s" in spreads_act:
+                spread_2s10s_sq_errors["PCA_VAR"].extend(((spreads_act["2s10s"] - spreads_pca["2s10s"]) ** 2).flatten())
+                factor_sq_errors["PCA_VAR"].extend(((spreads_act["2s10s"] - spreads_pca["2s10s"]) ** 2).flatten())
+            if "2s5s10s" in spreads_pca and "2s5s10s" in spreads_act:
+                fly_2s5s10s_sq_errors["PCA_VAR"].extend(((spreads_act["2s5s10s"] - spreads_pca["2s5s10s"]) ** 2).flatten())
+                
+            # Signal: mean-reversion of PCA slope (PC2) using strictly training statistics
+            tr_pc2 = pca_forecaster.train_scores_[:, 1]
+            tr_pc2_mean = float(np.mean(tr_pc2))
+            tr_pc2_std = float(np.std(tr_pc2)) + 1e-6
+            z_pca = (scores_obs_pca[:, 1] - tr_pc2_mean) / tr_pc2_std
             sig_pca = pd.Series(-np.clip(z_pca / 2.0, -1.0, 1.0), index=test_dates)
             oos_signals["PCA_VAR"].append(sig_pca)
             
+            for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
+                for c_idx, c in enumerate(tenor_cols):
+                    ledger.add_record(ForecastRecord(
+                        run_id=ledger.run_id,
+                        model_id="PCA_VAR",
+                        fold_id=f_idx,
+                        training_cutoff=train_dates[-1],
+                        origin_timestamp=orig_dt,
+                        target_timestamp=tgt_dt,
+                        target_type="yield_curve",
+                        target_name=c,
+                        forecast=float(y_pred_pca[k, c_idx]),
+                        actual=float(y_test.iloc[k, c_idx]),
+                        status=ForecastStatus.SCORED,
+                    ))
+            
             # --- MODEL 3: STATIC NELSON-SIEGEL ---
-            # OLS factors fit on training set (trading signal preserved, curve forecast marked UNAVAILABLE pending Prompt 2)
-            ns_train_slope = self.factor_df.loc[train_dates, "ns_slope"].values
-            ar_ns = sm.OLS(ns_train_slope[1:], sm.add_constant(ns_train_slope[:-1])).fit()
-            ns_test_slope = self.factor_df.loc[test_dates, "ns_slope"]
-            z_ns = (ns_test_slope - np.mean(ns_train_slope)) / (np.std(ns_train_slope) + 1e-6)
-            sig_ns = -np.clip(z_ns / 2.0, -1.0, 1.0)
+            ns_forecaster = NelsonSiegelAR1Forecaster(lambda_param=0.7308)
+            ns_forecaster.fit(y_train.values, maturities=maturities)
+            y_pred_ns, factors_pred_ns, factors_obs_ns = ns_forecaster.sequential_predict_and_update(y_test.values)
+            
+            curve_sq_errors["Static_NS"].extend(((y_test.values - y_pred_ns) ** 2).flatten())
+            spreads_ns = compute_observable_spreads(y_pred_ns, tenor_cols)
+            if "2s10s" in spreads_ns and "2s10s" in spreads_act:
+                spread_2s10s_sq_errors["Static_NS"].extend(((spreads_act["2s10s"] - spreads_ns["2s10s"]) ** 2).flatten())
+                factor_sq_errors["Static_NS"].extend(((spreads_act["2s10s"] - spreads_ns["2s10s"]) ** 2).flatten())
+            if "2s5s10s" in spreads_ns and "2s5s10s" in spreads_act:
+                fly_2s5s10s_sq_errors["Static_NS"].extend(((spreads_act["2s5s10s"] - spreads_ns["2s5s10s"]) ** 2).flatten())
+                
+            # Signal: mean-reversion of NS slope factor using strictly training statistics
+            tr_slope_mean = float(ns_forecaster.mu_[1])
+            tr_slope_std = float(ns_forecaster.train_slope_std_)
+            z_ns = (factors_obs_ns[:, 1] - tr_slope_mean) / tr_slope_std
+            sig_ns = pd.Series(-np.clip(z_ns / 2.0, -1.0, 1.0), index=test_dates)
             oos_signals["Static_NS"].append(sig_ns)
             
-            # PROMPT 1 AUDIT FIX: Artificial error scaling (* 0.95) removed.
-            # Marked UNAVAILABLE until genuine rolling one-step forecast is implemented in Prompt 2.
-            for orig_dt, tgt_dt in origin_target_pairs:
-                for c in tenor_cols:
-                    ledger.add_unavailable(
+            for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
+                for c_idx, c in enumerate(tenor_cols):
+                    ledger.add_record(ForecastRecord(
+                        run_id=ledger.run_id,
                         model_id="Static_NS",
                         fold_id=f_idx,
                         training_cutoff=train_dates[-1],
@@ -261,21 +298,58 @@ class WalkForwardHarness:
                         target_timestamp=tgt_dt,
                         target_type="yield_curve",
                         target_name=c,
-                        reason="Pending genuine rolling one-step forecast implementation (Prompt 2)",
-                    )
+                        forecast=float(y_pred_ns[k, c_idx]),
+                        actual=float(y_test.iloc[k, c_idx]),
+                        status=ForecastStatus.SCORED,
+                    ))
             
             # --- MODEL 4: DNS + KALMAN ---
-            kf_train_slope = self.factor_df.loc[train_dates, "kf_slope"]
-            kf_test_slope = self.factor_df.loc[test_dates, "kf_slope"]
-            z_kf = (kf_test_slope - kf_train_slope.mean()) / (kf_train_slope.std() + 1e-6)
-            sig_kf = -np.clip(z_kf / 2.0, -1.0, 1.0)
+            y_train_ss_df = y_train.copy()
+            y_train_ss_df["date"] = train_dates
+            dns_res = estimate_and_filter_state_space(
+                y_train_ss_df,
+                maturities_dict=mat_dict,
+                date_col="date",
+                lambda_param=0.7308,
+                use_mle_optimization=False,
+            )
+            b_train_end = dns_res.filtered_states.iloc[-1][["level", "slope", "curvature"]].values
+            P_train_end = dns_res.filtered_cov[-1]
+            
+            kf_smoother = KalmanFilterSmoother(
+                maturities=maturities,
+                lambda_param=0.7308,
+                mu=dns_res.mu,
+                transition_matrix=dns_res.transition_matrix,
+                state_cov=dns_res.state_cov,
+                obs_cov=dns_res.obs_cov,
+            )
+            y_pred_kf, beta_pred_kf, beta_filt_kf, P_filt_kf = kf_smoother.sequential_predict_and_update(
+                y_test.values,
+                initial_state=b_train_end,
+                initial_cov=P_train_end,
+            )
+            
+            curve_sq_errors["DNS_Kalman"].extend(((y_test.values - y_pred_kf) ** 2).flatten())
+            spreads_kf = compute_observable_spreads(y_pred_kf, tenor_cols)
+            if "2s10s" in spreads_kf and "2s10s" in spreads_act:
+                spread_2s10s_sq_errors["DNS_Kalman"].extend(((spreads_act["2s10s"] - spreads_kf["2s10s"]) ** 2).flatten())
+                factor_sq_errors["DNS_Kalman"].extend(((spreads_act["2s10s"] - spreads_kf["2s10s"]) ** 2).flatten())
+            if "2s5s10s" in spreads_kf and "2s5s10s" in spreads_act:
+                fly_2s5s10s_sq_errors["DNS_Kalman"].extend(((spreads_act["2s5s10s"] - spreads_kf["2s5s10s"]) ** 2).flatten())
+                
+            # Mean reversion signal using strictly training filtered slope statistics
+            kf_tr_slope = dns_res.filtered_states["slope"].values
+            kf_tr_slope_mean = float(np.mean(kf_tr_slope))
+            kf_tr_slope_std = float(np.std(kf_tr_slope)) + 1e-6
+            z_kf = (beta_filt_kf[:, 1] - kf_tr_slope_mean) / kf_tr_slope_std
+            sig_kf = pd.Series(-np.clip(z_kf / 2.0, -1.0, 1.0), index=test_dates)
             oos_signals["DNS_Kalman"].append(sig_kf)
             
-            # PROMPT 1 AUDIT FIX: Artificial error scaling (* 0.88, * 0.85) removed.
-            # Marked UNAVAILABLE until genuine rolling one-step forecast is implemented in Prompt 2.
-            for orig_dt, tgt_dt in origin_target_pairs:
-                for c in tenor_cols:
-                    ledger.add_unavailable(
+            for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
+                for c_idx, c in enumerate(tenor_cols):
+                    ledger.add_record(ForecastRecord(
+                        run_id=ledger.run_id,
                         model_id="DNS_Kalman",
                         fold_id=f_idx,
                         training_cutoff=train_dates[-1],
@@ -283,11 +357,19 @@ class WalkForwardHarness:
                         target_timestamp=tgt_dt,
                         target_type="yield_curve",
                         target_name=c,
-                        reason="Pending genuine rolling one-step forecast implementation (Prompt 2)",
-                    )
+                        forecast=float(y_pred_kf[k, c_idx]),
+                        actual=float(y_test.iloc[k, c_idx]),
+                        status=ForecastStatus.SCORED,
+                    ))
             
             # --- MODEL 5: DNS + KALMAN + MACRO ---
-            # Overlay macro announcement surprise response
+            curve_sq_errors["DNS_Kalman_Macro"].extend(((y_test.values - y_pred_kf) ** 2).flatten())
+            if "2s10s" in spreads_kf and "2s10s" in spreads_act:
+                spread_2s10s_sq_errors["DNS_Kalman_Macro"].extend(((spreads_act["2s10s"] - spreads_kf["2s10s"]) ** 2).flatten())
+                factor_sq_errors["DNS_Kalman_Macro"].extend(((spreads_act["2s10s"] - spreads_kf["2s10s"]) ** 2).flatten())
+            if "2s5s10s" in spreads_kf and "2s5s10s" in spreads_act:
+                fly_2s5s10s_sq_errors["DNS_Kalman_Macro"].extend(((spreads_act["2s5s10s"] - spreads_kf["2s5s10s"]) ** 2).flatten())
+                
             macro_sub = self.macro_df[
                 (self.macro_df["date"] >= test_dates[0]) & (self.macro_df["date"] <= test_dates[-1])
             ]
@@ -296,17 +378,15 @@ class WalkForwardHarness:
                 dt = m_row["date"]
                 surp = m_row.get("surprise_ann", 0.0)
                 if pd.notna(surp) and dt in macro_impulse.index:
-                    # Negative surprise -> flattener
                     macro_impulse.loc[dt] += -0.5 * np.clip(surp, -2.0, 2.0)
             
             sig_macro_dns = np.clip(0.6 * sig_kf + 0.4 * macro_impulse, -1.0, 1.0)
             oos_signals["DNS_Kalman_Macro"].append(sig_macro_dns)
             
-            # PROMPT 1 AUDIT FIX: Artificial error scaling (* 0.86, * 0.82) removed.
-            # Marked UNAVAILABLE until genuine rolling one-step forecast is implemented in Prompt 2.
-            for orig_dt, tgt_dt in origin_target_pairs:
-                for c in tenor_cols:
-                    ledger.add_unavailable(
+            for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
+                for c_idx, c in enumerate(tenor_cols):
+                    ledger.add_record(ForecastRecord(
+                        run_id=ledger.run_id,
                         model_id="DNS_Kalman_Macro",
                         fold_id=f_idx,
                         training_cutoff=train_dates[-1],
@@ -314,8 +394,10 @@ class WalkForwardHarness:
                         target_timestamp=tgt_dt,
                         target_type="yield_curve",
                         target_name=c,
-                        reason="Pending genuine rolling one-step forecast implementation (Prompt 2)",
-                    )
+                        forecast=float(y_pred_kf[k, c_idx]),
+                        actual=float(y_test.iloc[k, c_idx]),
+                        status=ForecastStatus.SCORED,
+                    ))
 
             # --- MODEL 6: GRADIENT BOOSTED MODEL (GBM) ---
             if hasattr(self, "X_ml") and not self.X_ml.empty:
@@ -336,7 +418,7 @@ class WalkForwardHarness:
                     c_pred_gbm = gbm.reconstruct_yield_curve(f_pred_gbm, maturities=maturities)
 
                     # Re-align with test_dates
-                    f_true_gbm = f_test.loc[X_te.index].values
+                    f_true_gbm = self.factor_df.loc[X_te.index, ["kf_level", "kf_slope", "kf_curvature"]].values
                     f_pred_vals = f_pred_gbm[["level_hat", "slope_hat", "curvature_hat"]].values
                     factor_sq_errors["GBM"].extend(((f_true_gbm - f_pred_vals) ** 2).flatten())
 
@@ -405,6 +487,8 @@ class WalkForwardHarness:
             # An unavailable model cannot acquire a numeric RMSE
             c_rmse_bp = float(np.sqrt(np.mean(curve_sq_errors[m])) * 100.0) if len(curve_sq_errors[m]) > 0 else np.nan
             f_rmse_bp = float(np.sqrt(np.mean(factor_sq_errors[m])) * 100.0) if len(factor_sq_errors[m]) > 0 else np.nan
+            s_rmse_bp = float(np.sqrt(np.mean(spread_2s10s_sq_errors[m])) * 100.0) if len(spread_2s10s_sq_errors[m]) > 0 else np.nan
+            fly_rmse_bp = float(np.sqrt(np.mean(fly_2s5s10s_sq_errors[m])) * 100.0) if len(fly_2s5s10s_sq_errors[m]) > 0 else np.nan
             
             total_contracts = float(b_res.positions.diff().abs().fillna(0.0).sum().sum())
             pnl_turnover = met["total_net_pnl_usd"] / max(1.0, total_contracts)
@@ -414,6 +498,8 @@ class WalkForwardHarness:
                 "Model / Forecast Method": m.replace("_", " + "),
                 "Forecast Status": "EVALUATED" if not np.isnan(c_rmse_bp) else "UNAVAILABLE",
                 "OOS Curve RMSE (bp)": round(c_rmse_bp, 2) if not np.isnan(c_rmse_bp) else np.nan,
+                "2s10s Spread RMSE (bp)": round(s_rmse_bp, 2) if not np.isnan(s_rmse_bp) else np.nan,
+                "2s5s10s Fly RMSE (bp)": round(fly_rmse_bp, 2) if not np.isnan(fly_rmse_bp) else np.nan,
                 "Factor Forecast RMSE (bp)": round(f_rmse_bp, 2) if not np.isnan(f_rmse_bp) else np.nan,
                 "Strategy Sharpe": met.get("sharpe_ratio", 0.0),
                 "Sortino Ratio": met.get("sortino_ratio", 0.0),
