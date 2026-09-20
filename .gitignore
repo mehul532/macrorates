@@ -17,6 +17,7 @@ htmlcov/
 data/raw/fred/*.csv
 data/raw/gsw/*.csv
 data/raw/macro/*.csv
+data/raw/macro/*.json
 data/raw/futures/*.csv
 !data/raw/**/.gitkeep
 !data/processed/.gitkeep

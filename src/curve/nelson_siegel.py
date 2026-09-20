@@ -159,10 +159,13 @@ class StaticNelsonSiegel:
         cols = sorted(cols, key=lambda c: maturities_dict[c])
         maturities = np.array([maturities_dict[c] for c in cols])
 
+        dates = yield_df[date_col].values
+        Y_all = yield_df[cols].to_numpy(dtype=float, na_value=np.nan)
+
         records = []
-        for _, row in yield_df.iterrows():
-            d = row[date_col]
-            y = row[cols].values.astype(float)
+        for i in range(len(yield_df)):
+            d = dates[i]
+            y = Y_all[i]
             if np.sum(~np.isnan(y)) >= 3:
                 fit = self.fit_cross_section(
                     yields=y,
@@ -171,7 +174,7 @@ class StaticNelsonSiegel:
                     optimize_lambda=optimize_lambda,
                 )
                 records.append({
-                    "date": d,
+                    "date": pd.to_datetime(d),
                     "level": fit.level,
                     "slope": fit.slope,
                     "curvature": fit.curvature,

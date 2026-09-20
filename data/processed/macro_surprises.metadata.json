@@ -1,0 +1,107 @@
+{
+  "source": "ALFRED Real-Time Vintages / Investing Consensus & FRED Macro Database",
+  "retrieval_timestamp": "2026-09-20T03:58:59.173207+00:00",
+  "series": [
+    "FOMC",
+    "CPI",
+    "CORE_CPI",
+    "NFP",
+    "UNEMP"
+  ],
+  "units": "Standard deviations (Z-score standardized)",
+  "frequency": "Event-based release dates",
+  "first_observation": "1970-01-01",
+  "last_observation": "2026-04-10",
+  "missingness": {
+    "FOMC": {
+      "total_releases": 296,
+      "with_consensus_surprise": 143,
+      "with_model_surprise": 296,
+      "sigma_ann": 0.0418,
+      "sigma_model": 0.6612,
+      "date_min": "1982-09-27",
+      "date_max": "2026-03-18"
+    },
+    "CPI": {
+      "total_releases": 675,
+      "with_consensus_surprise": 167,
+      "with_model_surprise": 675,
+      "sigma_ann": 0.1311,
+      "sigma_model": 0.4745,
+      "date_min": "1970-01-01",
+      "date_max": "2026-04-10"
+    },
+    "CORE_CPI": {
+      "total_releases": 675,
+      "with_consensus_surprise": 167,
+      "with_model_surprise": 675,
+      "sigma_ann": 0.1401,
+      "sigma_model": 0.3573,
+      "date_min": "1970-01-01",
+      "date_max": "2026-04-10"
+    },
+    "NFP": {
+      "total_releases": 676,
+      "with_consensus_surprise": 217,
+      "with_model_surprise": 676,
+      "sigma_ann": 738.8223,
+      "sigma_model": 1432.4118,
+      "date_min": "1970-01-02",
+      "date_max": "2026-04-03"
+    },
+    "UNEMP": {
+      "total_releases": 675,
+      "with_consensus_surprise": 212,
+      "with_model_surprise": 675,
+      "sigma_ann": 0.4893,
+      "sigma_model": 0.4541,
+      "date_min": "1970-01-01",
+      "date_max": "2026-04-03"
+    }
+  },
+  "transformation": "Two strictly separated surprise series: S_ann_t = (Actual - Consensus)/sigma(ann) and S_model_t = (Actual - ActualHat_{t|t-1})/sigma(e) fitted with strictly zero lookahead.",
+  "extra": {
+    "series_specs": {
+      "CPI": {
+        "series_id": "CPIAUCNS",
+        "name": "Headline CPI YoY",
+        "unit": "%",
+        "frequency": "Monthly",
+        "time_of_day": "08:30 ET",
+        "model_type": "ar1"
+      },
+      "CORE_CPI": {
+        "series_id": "CPILFENS",
+        "name": "Core CPI YoY",
+        "unit": "%",
+        "frequency": "Monthly",
+        "time_of_day": "08:30 ET",
+        "model_type": "ar1"
+      },
+      "NFP": {
+        "series_id": "PAYEMS",
+        "name": "Nonfarm Payrolls Change",
+        "unit": "Thousands",
+        "frequency": "Monthly",
+        "time_of_day": "08:30 ET",
+        "model_type": "ar1"
+      },
+      "UNEMP": {
+        "series_id": "UNRATE",
+        "name": "Unemployment Rate",
+        "unit": "%",
+        "frequency": "Monthly",
+        "time_of_day": "08:30 ET",
+        "model_type": "ar1"
+      },
+      "FOMC": {
+        "series_id": "DFEDTARU",
+        "name": "Fed Funds Target Rate Decision",
+        "unit": "%",
+        "frequency": "FOMC Meetings",
+        "time_of_day": "14:00 ET",
+        "model_type": "rw"
+      }
+    }
+  }
+}
