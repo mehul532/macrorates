@@ -139,6 +139,7 @@ macrorates/
 ├── scripts/                     # Utility scripts (GIF demo generator, data fetchers)
 ├── tests/                       # Pytest test suite (smoke tests, gap tests, regressions)
 ├── app.py                       # Interactive Streamlit "Yield Curve Event Explorer"
+├── svensson.py                  # Standalone 4-factor Svensson curve model deliverable
 └── pyproject.toml
 ```
 

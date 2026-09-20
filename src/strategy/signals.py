@@ -145,6 +145,56 @@ def compute_dns_factor_signals(
     return res
 
 
+def compute_svensson_factor_signals(
+    factor_df: pd.DataFrame,
+    slope_col: str = "sv_slope",
+    curv1_col: str = "sv_curv1",
+    curv2_col: str = "sv_curv2",
+    use_composite: bool = True,
+    window: int = 60,
+    min_periods: int = 20,
+    z_clip: float = 2.0,
+) -> pd.DataFrame:
+    """
+    Compute systematic RV signals using 4-factor Svensson latent factors.
+    
+    Uses Svensson Slope (beta1), Primary Curvature (beta2), and Second Curvature (beta3).
+    If use_composite=True, the effective butterfly signal is computed on composite
+    curvature (beta2 + beta3), capturing the combined intermediate deformation.
+    """
+    df = factor_df.copy()
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date").set_index("date")
+
+    s = df[slope_col]
+    s_ma = s.rolling(window=window, min_periods=min_periods).mean()
+    s_std = s.rolling(window=window, min_periods=min_periods).std()
+    z_slope = (s - s_ma) / (s_std + 1e-6)
+    signal_slope = -np.clip(z_slope / z_clip, -1.0, 1.0)
+
+    if use_composite:
+        c = df[curv1_col] + df[curv2_col]
+    else:
+        c = df[curv1_col]
+
+    c_ma = c.rolling(window=window, min_periods=min_periods).mean()
+    c_std = c.rolling(window=window, min_periods=min_periods).std()
+    z_curv = (c - c_ma) / (c_std + 1e-6)
+    signal_fly = -np.clip(z_curv / z_clip, -1.0, 1.0)
+
+    res = pd.DataFrame(index=df.index)
+    res["sv_slope"] = s
+    res["z_sv_slope"] = z_slope
+    res["signal_2s10s_svensson"] = signal_slope.fillna(0.0)
+
+    res["sv_curvature"] = c
+    res["z_sv_curv"] = z_curv
+    res["signal_fly_svensson"] = signal_fly.fillna(0.0)
+
+    return res
+
+
 def compute_macro_surprise_signals(
     dates: pd.DatetimeIndex,
     macro_df: pd.DataFrame,

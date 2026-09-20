@@ -5,6 +5,7 @@ Systematic Relative-Value Strategy and Backtest Engine.
 from src.strategy.signals import (
     compute_slope_zscore_signals,
     compute_dns_factor_signals,
+    compute_svensson_factor_signals,
     compute_macro_surprise_signals,
     generate_all_signals,
     MACRO_EVENT_BETAS,
@@ -38,6 +39,7 @@ from src.strategy.strategy import (
 __all__ = [
     "compute_slope_zscore_signals",
     "compute_dns_factor_signals",
+    "compute_svensson_factor_signals",
     "compute_macro_surprise_signals",
     "generate_all_signals",
     "MACRO_EVENT_BETAS",

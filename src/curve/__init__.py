@@ -9,7 +9,7 @@ from src.curve.curve import (
 )
 from src.curve.nelson_siegel import NelsonSiegelFit, StaticNelsonSiegel, nelson_siegel_loadings
 from src.curve.pca import PCAResult, YieldCurvePCA
-from src.curve.svensson import SvenssonCurve, SvenssonFit, svensson_loadings
+from src.curve.svensson import SvenssonCurve, SvenssonFit, svensson_loadings, compute_aic_bic
 
 __all__ = [
     "YieldCurvePCA",
@@ -20,6 +20,7 @@ __all__ = [
     "SvenssonFit",
     "nelson_siegel_loadings",
     "svensson_loadings",
+    "compute_aic_bic",
     "fit_pca",
     "fit_static_nelson_siegel",
     "compare_pca_vs_ns",
