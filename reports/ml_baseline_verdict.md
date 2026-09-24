@@ -1,7 +1,7 @@
 # Milestone 14 Verdict: Machine Learning Baseline & Feature Attribution
 
 **Author**: MacroRates Research Team  
-**Git Commit**: `fbd5579342d9db2c032513dae048f241a9e1142f`  
+**Git Commit**: `643ddea4237e61413c91ea9e7ece7dd64b0576b6`  
 **Run Mode**: `QUICK_TWO_FOLD_EVALUATION` (Folds: 2)  
 **Evaluated Sample**: 2026-06-29 to 2026-09-17 (57 trading days)  
 **Backend**: `sklearn` | **Seed**: `42`  
