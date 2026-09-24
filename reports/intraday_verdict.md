@@ -4,6 +4,12 @@
 **Dataset**: CME Globex 1-Minute Futures Panel (ZN 10-Year, ZF 5-Year, ZT 2-Year), Databento GLBX.MDP3 Schema (`ohlcv-1m`), Curated High-Profile Macro Surprises (CPI, NFP, FOMC, 2020–2024), Daily CMT Factor Panel (2006–2026)  
 **Econometric Methodology**: High-Frequency Event Window Analysis ($-5\text{m}$ to $+30\text{m}$), Realized Volatility Decomposition, Jordà (2005) Intraday Local Projections with Newey-West HAC Covariance  
 
+> [!IMPORTANT]
+> **RESEARCH INTEGRITY & DATA PROVENANCE DISCLOSURE**:
+> 1. **Synthetic Jump-Diffusion Fallback**: Unless live Databento API credentials (`DATABENTO_API_KEY`) are configured with an active CME Globex market data feed, all intraday analyses execute against the repository's calibrated synthetic jump-diffusion simulation fallback (`_generate_realistic_intraday_bars`).
+> 2. **Front-Loading Calibration**: In this fallback mode, high front-loading (~94.6% in 5 minutes) and rapid volatility decay are direct mathematical consequences of the simulation's parametric jump and exponential decay specification, NOT independent empirical discoveries from live exchange tick logs.
+> 3. **Window Boundary vs. Session Settlement**: The horizon labeled "Window End / Proxy Close ($+60\text{m}$)" corresponds strictly to the $+60\text{minute}$ post-release window boundary ($p_{\text{window\_end}}$), NOT the official 3:00 PM or 5:00 PM ET CME daily settlement price.
+
 ---
 
 ## 1. Executive Verdict & Core Finding
@@ -18,7 +24,7 @@
 >
 > The remainder of the trading day is characterized not by directional drift, but by:
 > 1. **Immediate Volatility Contraction**: Realized volatility explodes by an average of **19.6x baseline** in the first 5 minutes ($RV_{0-5\text{m}} = 10.6$ bp vs. $RV_{\text{pre}} = 0.5$ bp) before decaying exponentially with an empirical half-life of **3.3 minutes** ($\tau \approx 4.8$ min).
-> 2. **Negligible Subsequent Directional Drift**: From $t=+5\text{m}$ to $+30\text{m}$, the average net implied yield drift is a statistically indistinguishable **$+0.87$ bp**; from $t=+30\text{m}$ to daily market close, the net drift averages **$+0.58$ bp**.
+> 2. **Negligible Subsequent Directional Drift**: From $t=+5\text{m}$ to $+30\text{m}$, the average net implied yield drift is a statistically indistinguishable **$+0.87$ bp**; from $t=+30\text{m}$ to the $+60\text{m}$ window end, the net drift averages **$+0.58$ bp**.
 > 3. **Persistent Re-Anchoring**: Once established in the opening 5 minutes, the yield shift remains permanently embedded in the term structure, propagating through multi-day business horizons with minimal reversal.
 
 ---
@@ -26,16 +32,17 @@
 ## 2. Statistical Scorecard: Intraday Event Horizons
 
 ### Table 1: Price Discovery & Implied Yield Response by Horizon (ZN 10-Year Futures)
-*Base Reference Price*: $P_{t_0 - 1\text{m}}$ (1 minute prior to release). Implied yield conversion: $\Delta y = -\frac{\Delta P \times 1,000}{DV01}$.
+*Base Reference Price*: $P_{t_0 - 1\text{m}}$ (1 minute prior to release). Implied yield conversion: $\Delta y = -\frac{\Delta P \times 1,000}{DV01}$.  
+*Note*: Horizon $h = +60\text{m}$ denotes the $+60$-minute post-announcement window end ($p_{\text{window\_end}}$).
 
-| Horizon | Mean Response Share ($|\Delta y_h| / |\Delta y_{\text{close}}|$) | Median Response Share | Net Cumulative Drift | Mean Realized Volatility ($\text{bp}$) | Volatility Ratio vs Baseline |
+| Horizon | Mean Response Share ($|\Delta y_h| / |\Delta y_{\text{window\_end}}|$) | Median Response Share | Net Cumulative Drift | Mean Realized Volatility ($\text{bp}$) | Volatility Ratio vs Baseline |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Pre-Release ($-5\text{m}$ to $-1\text{m}$)** | — | — | Baseline | $0.54\text{ bp}$ | $1.0\times$ |
 | **$t = +1\text{ minute}$** | **$75.7\%$** | **$78.2\%$** | $+2.57\text{ bp} / \sigma$ | $8.42\text{ bp}$ | $15.6\times$ |
 | **$t = +5\text{ minutes}$** | **$94.6\%$** | **$93.1\%$** | $+3.66\text{ bp} / \sigma$ | $10.58\text{ bp}$ | **$19.6\times$** |
 | **$t = +15\text{ minutes}$** | **$96.1\%$** | **$95.4\%$** | $+4.21\text{ bp} / \sigma$ | $4.12\text{ bp}$ | $7.6\times$ |
 | **$t = +30\text{ minutes}$** | **$96.5\%$** | **$96.0\%$** | $+4.25\text{ bp} / \sigma$ | $2.31\text{ bp}$ | $4.3\times$ |
-| **Daily Close ($h = \text{close}$)** | **$100.0\%$** | **$100.0\%$** | $+4.44\text{ bp} / \sigma$ | $1.20\text{ bp}$ | $2.2\times$ |
+| **Window End ($h = +60\text{m}$)** | **$100.0\%$** | **$100.0\%$** | $+4.44\text{ bp} / \sigma$ | $1.20\text{ bp}$ | $2.2\times$ |
 
 ---
 

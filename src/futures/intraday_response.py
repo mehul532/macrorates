@@ -363,6 +363,8 @@ class DatabentoIntradayProvider:
 
         if cache_file.exists():
             df = pd.read_parquet(cache_file)
+            if "data_source" not in df.columns:
+                df["data_source"] = "SYNTHETIC_CALIBRATION_FALLBACK"
             return df
 
         # Try live Databento fetch if API key present
@@ -411,6 +413,7 @@ class DatabentoIntradayProvider:
         out["event_indicator"] = event.indicator
         out["event_date"] = event.date
         out["surprise_ann"] = event.surprise_ann
+        out["data_source"] = "DATABENTO_LIVE"
         return out.sort_values("timestamp").reset_index(drop=True)
 
     def _generate_realistic_intraday_bars(
@@ -515,6 +518,7 @@ class DatabentoIntradayProvider:
                 "event_indicator": event.indicator,
                 "event_date": event.date,
                 "surprise_ann": event.surprise_ann,
+                "data_source": "SYNTHETIC_CALIBRATION_FALLBACK",
             })
             curr_price = close_p
 
@@ -558,6 +562,15 @@ class EventWindowSummary:
     drift_5m_to_30m_bp: float         # delta_y_30m - delta_y_5m
     drift_30m_to_close_bp: float      # delta_y_close - delta_y_30m
     window_df: pd.DataFrame
+    data_source: str = "SYNTHETIC_CALIBRATION_FALLBACK"  # "DATABENTO_LIVE" vs "SYNTHETIC_CALIBRATION_FALLBACK"
+    p_window_end_60m: float = 0.0     # Price at +60m window end (alias for p_close)
+    delta_y_window_end_bp: float = 0.0  # Implied yield move at +60m window end
+
+    def __post_init__(self):
+        if self.p_window_end_60m == 0.0:
+            self.p_window_end_60m = self.p_close
+        if self.delta_y_window_end_bp == 0.0:
+            self.delta_y_window_end_bp = self.delta_y_close_bp
 
 
 class IntradayEventWindowExtractor:
@@ -721,6 +734,9 @@ class IntradayEventWindowExtractor:
             drift_5m_to_30m_bp=round(drift_5m_to_30m, 3),
             drift_30m_to_close_bp=round(drift_30m_to_close, 3),
             window_df=window,
+            data_source=str(bars["data_source"].iloc[0]) if "data_source" in bars.columns else "SYNTHETIC_CALIBRATION_FALLBACK",
+            p_window_end_60m=round(p_close, 5),
+            delta_y_window_end_bp=dy_close,
         )
 
 

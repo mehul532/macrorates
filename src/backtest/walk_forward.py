@@ -193,10 +193,13 @@ class WalkForwardHarness:
             "GBM",
         ]
         
-        # Cumulative out-of-sample predictions and signals containers
-        oos_signals = {m: [] for m in models}
-        curve_sq_errors = {m: [] for m in models}
-        factor_sq_errors = {m: [] for m in models}
+        # Diagnostic and control models (Prompt 6 Integrity Audit)
+        extra_models = [
+            "DNS_Scaled_60",
+            "Static_NS_Residual_Preserving",
+            "DNS_Kalman_Residual_Preserving",
+        ]
+        all_eval_models = models + extra_models
         
         # Initialize formal ForecastLedger under research-integrity contract
         ledger = ForecastLedger(run_id="walk_forward_evaluation")
@@ -205,10 +208,21 @@ class WalkForwardHarness:
         tenor_cols = [c for c in CANONICAL_TENORS.keys() if c in self.yield_df.columns]
         maturities = get_canonical_maturities(tenor_cols)
         mat_dict = {c: CANONICAL_TENORS[c] for c in tenor_cols}
+
+        # Cumulative out-of-sample predictions, signals, and raw unclipped signal containers
+        oos_signals = {m: [] for m in all_eval_models}
+        raw_signals = {m: [] for m in all_eval_models}
+        curve_sq_errors = {m: [] for m in all_eval_models}
+        factor_sq_errors = {m: [] for m in all_eval_models}
+        spread_2s10s_sq_errors = {m: [] for m in all_eval_models}
+        fly_2s5s10s_sq_errors = {m: [] for m in all_eval_models}
+        per_tenor_sq_errors = {m: {c: [] for c in tenor_cols} for m in all_eval_models}
         
-        spread_2s10s_sq_errors = {m: [] for m in models}
-        fly_2s5s10s_sq_errors = {m: [] for m in models}
-        per_tenor_sq_errors = {m: {c: [] for c in tenor_cols} for m in models}
+        # Cross-sectional curve fit & dynamic factor diagnostics
+        contemp_fit_sq_errors = []
+        factor_rw_sq_errors = []
+        factor_ar1_sq_errors = []
+        fold_macro_audit = []
         
         for f_idx, (train_dates, test_dates) in enumerate(folds):
             # Define explicit rolling 1-step forecast origin-target pairs:
@@ -218,6 +232,8 @@ class WalkForwardHarness:
             origin_target_pairs = [(train_dates[-1], test_dates[0])] + [
                 (test_dates[i], test_dates[i + 1]) for i in range(len(test_dates) - 1)
             ]
+            orig_dates = [pair[0] for pair in origin_target_pairs]
+            tgt_dates = [pair[1] for pair in origin_target_pairs]
             
             # In-sample slices (STRICTLY <= train_dates[-1])
             y_train = self.yield_df.loc[train_dates, tenor_cols]
@@ -234,6 +250,18 @@ class WalkForwardHarness:
             else:
                 train_spread_std = 0.05
             
+            # Track macroeconomic events in train vs test windows (Prompt 6 Macro Audit)
+            m_tr = self.macro_df[(self.macro_df["date"] >= train_dates[0]) & (self.macro_df["date"] <= train_dates[-1])]
+            m_te = self.macro_df[(self.macro_df["date"] >= test_dates[0]) & (self.macro_df["date"] <= test_dates[-1])]
+            fold_macro_audit.append({
+                "fold_id": f_idx,
+                "train_cutoff": str(train_dates[-1].date()),
+                "test_start": str(test_dates[0].date()),
+                "test_end": str(test_dates[-1].date()),
+                "training_event_count": len(m_tr),
+                "test_event_count": len(m_te),
+            })
+
             # --- MODEL 1: RANDOM WALK ---
             # 1-step forecast is previous day's curve
             y_rw_pred = np.vstack([y_train.values[-1:], y_test.values[:-1]])
@@ -248,8 +276,9 @@ class WalkForwardHarness:
             if "2s5s10s" in spreads_rw and "2s5s10s" in spreads_act:
                 fly_2s5s10s_sq_errors["Random_Walk"].extend(((spreads_act["2s5s10s"] - spreads_rw["2s5s10s"]) ** 2).flatten())
                 
-            sig_rw = pd.Series(0.0, index=test_dates)
+            sig_rw = pd.Series(0.0, index=orig_dates)
             oos_signals["Random_Walk"].append(sig_rw)
+            raw_signals["Random_Walk"].extend([0.0] * len(orig_dates))
 
             # Record Random Walk in ForecastLedger
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
@@ -289,8 +318,11 @@ class WalkForwardHarness:
             sig_pca_arr = map_curve_forecast_to_spread_signal(
                 y_pred_pca, y_origin_all, tenor_cols, train_spread_std, strategy_type
             )
-            sig_pca = pd.Series(sig_pca_arr, index=test_dates)
+            sig_pca = pd.Series(sig_pca_arr, index=orig_dates)
             oos_signals["PCA_VAR"].append(sig_pca)
+            sp_curr = compute_observable_spreads(y_origin_all, tenor_cols)["2s10s"]
+            raw_pca = (spreads_pca["2s10s"] - sp_curr) / train_spread_std
+            raw_signals["PCA_VAR"].extend(raw_pca.tolist())
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
                 for c_idx, c in enumerate(tenor_cols):
@@ -327,8 +359,10 @@ class WalkForwardHarness:
             sig_ns_arr = map_curve_forecast_to_spread_signal(
                 y_pred_ns, y_origin_all, tenor_cols, train_spread_std, strategy_type
             )
-            sig_ns = pd.Series(sig_ns_arr, index=test_dates)
+            sig_ns = pd.Series(sig_ns_arr, index=orig_dates)
             oos_signals["Static_NS"].append(sig_ns)
+            raw_ns = (spreads_ns["2s10s"] - sp_curr) / train_spread_std
+            raw_signals["Static_NS"].extend(raw_ns.tolist())
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
                 for c_idx, c in enumerate(tenor_cols):
@@ -345,6 +379,43 @@ class WalkForwardHarness:
                         actual=float(y_test.iloc[k, c_idx]),
                         status=ForecastStatus.SCORED,
                     ))
+
+            # --- Prompt 6 Econometric Diagnostics for Nelson-Siegel ---
+            # 1. Contemporaneous curve-fit error: e_t^{fit} = y_t - Lambda @ beta_obs
+            Lambda_ns = nelson_siegel_loadings(maturities, lambda_param=0.7308)
+            y_fit_ns = (Lambda_ns @ factors_obs_ns.T).T
+            contemp_fit_sq_errors.extend(((y_test.values - y_fit_ns) ** 2).flatten())
+            
+            # 2. Factor Random Walk vs AR(1) dynamics
+            b_train_last_ns = np.linalg.pinv(Lambda_ns) @ y_train.values[-1]
+            b_prev_all_ns = np.vstack([b_train_last_ns.reshape(1, -1), factors_obs_ns[:-1]])
+            factor_rw_sq_errors.extend(((factors_obs_ns - b_prev_all_ns) ** 2).flatten())
+            factor_ar1_sq_errors.extend(((factors_obs_ns - factors_pred_ns) ** 2).flatten())
+            
+            # 3. Residual-Preserving Static NS Forecast: y_origin + Lambda @ (beta_pred - beta_orig)
+            delta_beta_ns = factors_pred_ns - b_prev_all_ns
+            y_pred_ns_res = y_origin_all + (Lambda_ns @ delta_beta_ns.T).T
+            curve_sq_errors["Static_NS_Residual_Preserving"].extend(((y_test.values - y_pred_ns_res) ** 2).flatten())
+            for c_idx, c in enumerate(tenor_cols):
+                per_tenor_sq_errors["Static_NS_Residual_Preserving"][c].extend(
+                    ((y_test.iloc[:, c_idx].values - y_pred_ns_res[:, c_idx]) ** 2).tolist()
+                )
+            spreads_ns_res = compute_observable_spreads(y_pred_ns_res, tenor_cols)
+            if "2s10s" in spreads_ns_res and "2s10s" in spreads_act:
+                diff_res = ((spreads_act["2s10s"] - spreads_ns_res["2s10s"]) ** 2).flatten()
+                spread_2s10s_sq_errors["Static_NS_Residual_Preserving"].extend(diff_res)
+                factor_sq_errors["Static_NS_Residual_Preserving"].extend(diff_res)
+            if "2s5s10s" in spreads_ns_res and "2s5s10s" in spreads_act:
+                fly_2s5s10s_sq_errors["Static_NS_Residual_Preserving"].extend(
+                    ((spreads_act["2s5s10s"] - spreads_ns_res["2s5s10s"]) ** 2).flatten()
+                )
+            sig_ns_res_arr = map_curve_forecast_to_spread_signal(
+                y_pred_ns_res, y_origin_all, tenor_cols, train_spread_std, strategy_type
+            )
+            raw_ns_res = (spreads_ns_res["2s10s"] - sp_curr) / train_spread_std
+            raw_signals["Static_NS_Residual_Preserving"].extend(raw_ns_res.tolist())
+            sig_ns_res = pd.Series(sig_ns_res_arr, index=orig_dates)
+            oos_signals["Static_NS_Residual_Preserving"].append(sig_ns_res)
             
             # --- MODEL 4: DNS + KALMAN ---
             y_train_ss_df = y_train.copy()
@@ -389,8 +460,10 @@ class WalkForwardHarness:
             sig_kf_arr = map_curve_forecast_to_spread_signal(
                 y_pred_kf, y_origin_all, tenor_cols, train_spread_std, strategy_type
             )
-            sig_kf = pd.Series(sig_kf_arr, index=test_dates)
+            sig_kf = pd.Series(sig_kf_arr, index=orig_dates)
             oos_signals["DNS_Kalman"].append(sig_kf)
+            raw_kf = (spreads_kf["2s10s"] - sp_curr) / train_spread_std
+            raw_signals["DNS_Kalman"].extend(raw_kf.tolist())
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
                 for c_idx, c in enumerate(tenor_cols):
@@ -407,6 +480,46 @@ class WalkForwardHarness:
                         actual=float(y_test.iloc[k, c_idx]),
                         status=ForecastStatus.SCORED,
                     ))
+
+            # --- Residual-Preserving DNS Forecast Diagnostic ---
+            b_prev_all_kf = np.vstack([b_train_end.reshape(1, -1), beta_filt_kf[:-1]])
+            delta_beta_kf = beta_pred_kf - b_prev_all_kf
+            y_pred_kf_res = y_origin_all + (Lambda_ns @ delta_beta_kf.T).T
+            curve_sq_errors["DNS_Kalman_Residual_Preserving"].extend(((y_test.values - y_pred_kf_res) ** 2).flatten())
+            for c_idx, c in enumerate(tenor_cols):
+                per_tenor_sq_errors["DNS_Kalman_Residual_Preserving"][c].extend(
+                    ((y_test.iloc[:, c_idx].values - y_pred_kf_res[:, c_idx]) ** 2).tolist()
+                )
+            spreads_kf_res = compute_observable_spreads(y_pred_kf_res, tenor_cols)
+            if "2s10s" in spreads_kf_res and "2s10s" in spreads_act:
+                diff_kf_res = ((spreads_act["2s10s"] - spreads_kf_res["2s10s"]) ** 2).flatten()
+                spread_2s10s_sq_errors["DNS_Kalman_Residual_Preserving"].extend(diff_kf_res)
+                factor_sq_errors["DNS_Kalman_Residual_Preserving"].extend(diff_kf_res)
+            if "2s5s10s" in spreads_kf_res and "2s5s10s" in spreads_act:
+                fly_2s5s10s_sq_errors["DNS_Kalman_Residual_Preserving"].extend(
+                    ((spreads_act["2s5s10s"] - spreads_kf_res["2s5s10s"]) ** 2).flatten()
+                )
+            sig_kf_res_arr = map_curve_forecast_to_spread_signal(
+                y_pred_kf_res, y_origin_all, tenor_cols, train_spread_std, strategy_type
+            )
+            raw_kf_res = (spreads_kf_res["2s10s"] - sp_curr) / train_spread_std
+            raw_signals["DNS_Kalman_Residual_Preserving"].extend(raw_kf_res.tolist())
+            sig_kf_res = pd.Series(sig_kf_res_arr, index=orig_dates)
+            oos_signals["DNS_Kalman_Residual_Preserving"].append(sig_kf_res)
+
+            # --- CONTROL MODEL: DNS Scaled at 60% Exposure (Prompt 6 Macro Audit Control) ---
+            # Identical forecast curve and spread RMSE to DNS_Kalman, but scaled to 60% risk exposure
+            curve_sq_errors["DNS_Scaled_60"].extend(((y_test.values - y_pred_kf) ** 2).flatten())
+            for c_idx, c in enumerate(tenor_cols):
+                per_tenor_sq_errors["DNS_Scaled_60"][c].extend(sq_kf)
+            if "2s10s" in spreads_kf and "2s10s" in spreads_act:
+                spread_2s10s_sq_errors["DNS_Scaled_60"].extend(((spreads_act["2s10s"] - spreads_kf["2s10s"]) ** 2).flatten())
+                factor_sq_errors["DNS_Scaled_60"].extend(((spreads_act["2s10s"] - spreads_kf["2s10s"]) ** 2).flatten())
+            if "2s5s10s" in spreads_kf and "2s5s10s" in spreads_act:
+                fly_2s5s10s_sq_errors["DNS_Scaled_60"].extend(((spreads_act["2s5s10s"] - spreads_kf["2s5s10s"]) ** 2).flatten())
+            sig_scaled_60 = pd.Series(0.60 * sig_kf_arr, index=orig_dates)
+            oos_signals["DNS_Scaled_60"].append(sig_scaled_60)
+            raw_signals["DNS_Scaled_60"].extend((0.60 * raw_kf).tolist())
             
             # --- MODEL 5: DNS + KALMAN + MACRO ---
             curve_sq_errors["DNS_Kalman_Macro"].extend(((y_test.values - y_pred_kf) ** 2).flatten())
@@ -441,8 +554,14 @@ class WalkForwardHarness:
                         b_target = b_info.get("slope_beta", 0.0)
                     macro_impulse.loc[dt] += b_target * np.clip(surp, -2.0, 2.0)
             
-            sig_macro_dns = np.clip(0.6 * sig_kf + 0.4 * (macro_impulse / train_spread_std), -1.0, 1.0)
+            nonzero_macro_days = int((macro_impulse != 0.0).sum())
+            fold_macro_audit[-1]["nonzero_macro_days"] = nonzero_macro_days
+            
+            sig_macro_arr = np.clip(0.6 * sig_kf_arr + 0.4 * (macro_impulse.values / train_spread_std), -1.0, 1.0)
+            sig_macro_dns = pd.Series(sig_macro_arr, index=orig_dates)
             oos_signals["DNS_Kalman_Macro"].append(sig_macro_dns)
+            raw_macro = 0.6 * raw_kf + 0.4 * (macro_impulse.values / train_spread_std)
+            raw_signals["DNS_Kalman_Macro"].extend(raw_macro.tolist())
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
                 for c_idx, c in enumerate(tenor_cols):
@@ -474,7 +593,7 @@ class WalkForwardHarness:
                         )
                         gbm.fit(X_tr, y_tr)
                         
-                        sig_gbm_series = pd.Series(0.0, index=test_dates)
+                        sig_gbm_series = pd.Series(0.0, index=orig_dates)
 
                         for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
                             if orig_dt in self.X_ml.index:
@@ -502,11 +621,13 @@ class WalkForwardHarness:
                                     diff_fly = float((sp_act["2s5s10s"] - sp_pred["2s5s10s"]).item())
                                     fly_2s5s10s_sq_errors["GBM"].append(diff_fly ** 2)
 
-                                # Signal at tgt_dt based on forecast made at orig_dt
+                                # Signal formed at orig_dt for horizon orig_dt -> tgt_dt
                                 sig_gbm_val = map_curve_forecast_to_spread_signal(
                                     c_hat, y_origin_all[k], tenor_cols, train_spread_std, strategy_type
                                 )
-                                sig_gbm_series.loc[tgt_dt] = float(sig_gbm_val)
+                                sig_gbm_series.loc[orig_dt] = float(sig_gbm_val)
+                                diff_raw_gbm = (float(sp_pred["2s10s"].item()) - float(sp_curr[k])) / train_spread_std
+                                raw_signals["GBM"].append(float(diff_raw_gbm))
 
                                 for c_idx, c in enumerate(tenor_cols):
                                     ledger.add_record(ForecastRecord(
@@ -523,6 +644,7 @@ class WalkForwardHarness:
                                         status=ForecastStatus.SCORED,
                                     ))
                             else:
+                                raw_signals["GBM"].append(0.0)
                                 for c in tenor_cols:
                                     ledger.add_unavailable(
                                         model_id="GBM",
@@ -550,7 +672,8 @@ class WalkForwardHarness:
                                     target_name=c,
                                     reason=f"GBM fitting failed: {e}",
                                 )
-                        oos_signals["GBM"].append(pd.Series(0.0, index=test_dates))
+                        oos_signals["GBM"].append(pd.Series(0.0, index=orig_dates))
+                        raw_signals["GBM"].extend([0.0] * len(orig_dates))
                 else:
                     for orig_dt, tgt_dt in origin_target_pairs:
                         for c in tenor_cols:
@@ -564,7 +687,8 @@ class WalkForwardHarness:
                                 target_name=c,
                                 reason="Insufficient training observations (<100) for GBM fit (Prompt 4)",
                             )
-                    oos_signals["GBM"].append(pd.Series(0.0, index=test_dates))
+                    oos_signals["GBM"].append(pd.Series(0.0, index=orig_dates))
+                    raw_signals["GBM"].extend([0.0] * len(orig_dates))
             else:
                 for orig_dt, tgt_dt in origin_target_pairs:
                     for c in tenor_cols:
@@ -578,13 +702,16 @@ class WalkForwardHarness:
                             target_name=c,
                             reason="ML feature panel unavailable (Prompt 4)",
                         )
-                oos_signals["GBM"].append(pd.Series(0.0, index=test_dates))
+                oos_signals["GBM"].append(pd.Series(0.0, index=orig_dates))
+                raw_signals["GBM"].extend([0.0] * len(orig_dates))
 
-        # Concatenate out-of-sample series and execute backtests
-        baseline_rows = []
+        # Concatenate out-of-sample series and execute backtests across all evaluated and diagnostic models
+        all_test_dates = [dt for _, test_dates in folds for dt in test_dates]
+        last_tgt_date = folds[-1][1][-1]
         backtest_results = {}
+        all_model_metrics = {}
         
-        for m in models:
+        for m in all_eval_models:
             full_sig = pd.concat(oos_signals[m])
             pos_df = compute_continuous_positions(
                 signals_series=full_sig,
@@ -592,6 +719,15 @@ class WalkForwardHarness:
                 target_dv01=self.config.target_dv01,
             )
             
+            # Horizon alignment: position established at origin t is held overnight into target t+1.
+            # Append final flat row on last target date to close out the last overnight holding period.
+            if last_tgt_date not in pos_df.index:
+                flat_row = pd.DataFrame(
+                    [{c: 0 for c in pos_df.columns}],
+                    index=[last_tgt_date],
+                )
+                pos_df = pd.concat([pos_df, flat_row])
+                
             b_res = self.engine.run_strategy(
                 strategy_name=m,
                 positions_df=pos_df,
@@ -601,7 +737,6 @@ class WalkForwardHarness:
             met = b_res.metrics
             
             # Compute RMSE in basis points (1 bp = 0.01 percentage point)
-            # An unavailable model cannot acquire a numeric RMSE
             c_rmse_bp = float(np.sqrt(np.mean(curve_sq_errors[m])) * 100.0) if len(curve_sq_errors[m]) > 0 else np.nan
             f_rmse_bp = float(np.sqrt(np.mean(factor_sq_errors[m])) * 100.0) if len(factor_sq_errors[m]) > 0 else np.nan
             s_rmse_bp = float(np.sqrt(np.mean(spread_2s10s_sq_errors[m])) * 100.0) if len(spread_2s10s_sq_errors[m]) > 0 else np.nan
@@ -615,7 +750,7 @@ class WalkForwardHarness:
             pnl_turnover = met.get("pnl_turnover_usd_per_lot", np.nan)
             pnl_dv01 = round(met.get("total_net_trading_pnl_usd", 0.0) / self.config.target_dv01, 2)
             
-            baseline_rows.append({
+            all_model_metrics[m] = {
                 "Model / Forecast Method": m.replace("_", " + "),
                 "Forecast Status": "EVALUATED" if not np.isnan(c_rmse_bp) else "UNAVAILABLE",
                 "Sample Size (Days)": len(full_sig),
@@ -630,7 +765,7 @@ class WalkForwardHarness:
                 "Sortino Ratio": met.get("sortino_ratio", np.nan),
                 "Max Drawdown (%)": met.get("max_drawdown_pct", 0.0),
                 "Annual Turnover (lots)": round(total_contracts / (len(full_sig)/252.0), 1),
-                "Hit Rate (%)": met.get("win_rate_pct", 0.0),
+                "Hit Rate (%)": met.get("win_rate_pct", np.nan),
                 "PnL / DV01 ($)": pnl_dv01,
                 "PnL / Turnover ($/lot)": pnl_turnover,
                 "Gross PnL ($)": met.get("total_gross_pnl_usd", 0.0),
@@ -639,11 +774,18 @@ class WalkForwardHarness:
                 "Trading Net PnL ($)": met.get("total_net_trading_pnl_usd", 0.0),
                 "Cash Interest ($)": met.get("total_interest_earned_usd", 0.0),
                 "Collateral Net PnL ($)": met.get("total_collateral_pnl_usd", met.get("total_net_pnl_usd", 0.0)),
-            })
+            }
             
+        # Build baseline_table strictly for the 6 primary evaluated models
+        baseline_rows = [all_model_metrics[m] for m in models]
         baseline_table = pd.DataFrame(baseline_rows).set_index("Model / Forecast Method")
 
-        # Build common_sample_table containing evaluated models plus Cash Only strategy benchmark
+        # Macro audit statistics
+        total_test_macro_events = sum(f.get("test_event_count", 0) for f in fold_macro_audit)
+        total_train_macro_events = sum(f.get("training_event_count", 0) for f in fold_macro_audit)
+        total_nonzero_macro_days = sum(f.get("nonzero_macro_days", 0) for f in fold_macro_audit)
+
+        # Build common_sample_table containing evaluated models, risk control, diagnostics, and Cash Only
         ROLE_MAP = {
             "Random_Walk": ("Random Walk (Curve Benchmark)", "Curve Benchmark"),
             "PCA_VAR": ("PCA / VAR(1)", "Term Structure Factor Model"),
@@ -651,15 +793,30 @@ class WalkForwardHarness:
             "DNS_Kalman": ("DNS + Kalman", "Dynamic Term Structure Model"),
             "DNS_Kalman_Macro": ("DNS + Kalman + Macro", "Macro-Augmented DTSM"),
             "GBM": ("GBM", "Machine Learning Baseline"),
+            "DNS_Scaled_60": ("DNS (60% Exposure Control)", "Risk-Scaling Control (60% Exposure)"),
+            "Static_NS_Residual_Preserving": ("Static NS (Residual-Preserving Diagnostic)", "Diagnostic (Static NS Residual-Preserving)"),
+            "DNS_Kalman_Residual_Preserving": ("DNS + Kalman (Residual-Preserving Diagnostic)", "Diagnostic (DNS Kalman Residual-Preserving)"),
         }
 
         common_sample_rows = []
-        for orig_row, m in zip(baseline_rows, models):
+        ordered_models = models + extra_models
+        for m in ordered_models:
+            orig_row = all_model_metrics[m]
             display_name, role = ROLE_MAP.get(m, (orig_row["Model / Forecast Method"], "Model Baseline"))
+            
+            # Audit status: if test window has zero macro events, relabel macro model explicitly
+            f_status = orig_row["Forecast Status"]
+            if m == "DNS_Kalman_Macro" and total_test_macro_events == 0:
+                f_status = "NOT_EVALUATED (NO_TEST_RELEASES)"
+            elif m == "DNS_Scaled_60":
+                f_status = "CONTROL (SCALED_DNS)"
+            elif "Residual_Preserving" in m:
+                f_status = "DIAGNOSTIC"
+
             row_copy = {
                 "Model / Forecast Method": display_name,
                 "Benchmark Role": role,
-                "Forecast Status": orig_row["Forecast Status"],
+                "Forecast Status": f_status,
                 "Sample Size (Days)": orig_row["Sample Size (Days)"],
                 "OOS Curve RMSE (bp)": orig_row["OOS Curve RMSE (bp)"],
                 "2Y Curve RMSE (bp)": orig_row["2Y Curve RMSE (bp)"],
@@ -684,8 +841,13 @@ class WalkForwardHarness:
             }
             common_sample_rows.append(row_copy)
 
-        all_eval_dates = pd.concat(oos_signals["Random_Walk"]).index
-        cash_pos_df = pd.DataFrame(0, index=all_eval_dates, columns=[f"n_{s.lower()}" for s in ["zt", "zf", "zn"]])
+        # Cash-Only benchmark
+        first_orig_date = folds[0][0][-1]
+        cash_pos_df = pd.DataFrame(
+            0,
+            index=[first_orig_date] + list(all_test_dates),
+            columns=[f"n_{s.lower()}" for s in ["zt", "zf", "zn"]],
+        )
         b_cash = self.engine.run_strategy(
             strategy_name="Cash_Only",
             positions_df=cash_pos_df,
@@ -698,7 +860,7 @@ class WalkForwardHarness:
             "Model / Forecast Method": "Cash Only (Strategy Benchmark)",
             "Benchmark Role": "Strategy Benchmark",
             "Forecast Status": "BENCHMARK_ONLY",
-            "Sample Size (Days)": len(cash_pos_df),
+            "Sample Size (Days)": len(all_test_dates),
             "OOS Curve RMSE (bp)": np.nan,
             "2Y Curve RMSE (bp)": np.nan,
             "5Y Curve RMSE (bp)": np.nan,
@@ -722,6 +884,26 @@ class WalkForwardHarness:
         })
         common_sample_table = pd.DataFrame(common_sample_rows).set_index("Model / Forecast Method")
 
+        # Econometric diagnostics computation
+        ns_fit_rmse_bp = float(np.sqrt(np.mean(contemp_fit_sq_errors)) * 100.0) if contemp_fit_sq_errors else np.nan
+        factor_rw_rmse_bp = float(np.sqrt(np.mean(factor_rw_sq_errors)) * 100.0) if factor_rw_sq_errors else np.nan
+        factor_ar1_rmse_bp = float(np.sqrt(np.mean(factor_ar1_sq_errors)) * 100.0) if factor_ar1_sq_errors else np.nan
+
+        clipping_stats = {}
+        mean_unclipped_stats = {}
+        for m in all_eval_models:
+            raw_arr = np.array(raw_signals[m])
+            if len(raw_arr) > 0:
+                clipping_stats[m] = round(float(np.mean(np.abs(raw_arr) >= 0.999) * 100.0), 2)
+                mean_unclipped_stats[m] = round(float(np.mean(np.abs(raw_arr))), 3)
+            else:
+                clipping_stats[m] = np.nan
+                mean_unclipped_stats[m] = np.nan
+
+        sig_dict = {m: pd.concat(oos_signals[m]).values for m in all_eval_models if len(oos_signals[m]) > 0}
+        sig_df = pd.DataFrame(sig_dict)
+        sig_corr_matrix = sig_df.corr().round(4).to_dict() if not sig_df.empty else {}
+
         run_metadata = {
             "git_commit": get_git_commit_hash(),
             "data_checksums": {
@@ -729,9 +911,9 @@ class WalkForwardHarness:
                 "factor_panel": get_file_checksum("data/processed/factor_panel.parquet"),
                 "macro_surprises": get_file_checksum("data/processed/macro_surprises.parquet"),
             },
-            "eval_start_date": str(all_eval_dates[0].date()) if len(all_eval_dates) > 0 else "N/A",
-            "eval_end_date": str(all_eval_dates[-1].date()) if len(all_eval_dates) > 0 else "N/A",
-            "total_eval_days": len(all_eval_dates),
+            "eval_start_date": str(all_test_dates[0].date()) if len(all_test_dates) > 0 else "N/A",
+            "eval_end_date": str(all_test_dates[-1].date()) if len(all_test_dates) > 0 else "N/A",
+            "total_eval_days": len(all_test_dates),
             "fold_count": len(folds),
             "run_mode": "QUICK_TWO_FOLD_EVALUATION" if len(folds) <= 2 else "FULL_SAMPLE_EVALUATION",
             "tenor_panel": tenor_cols,
@@ -745,6 +927,27 @@ class WalkForwardHarness:
             "seed": getattr(self.config, "random_state", 42),
             "gbm_backend": getattr(self.config, "gbm_backend", "sklearn"),
             "ledger_summary": ledger.summary_by_model(),
+            "macro_event_audit": {
+                "total_training_events": total_train_macro_events,
+                "total_test_events": total_test_macro_events,
+                "nonzero_macro_days": total_nonzero_macro_days,
+                "evaluation_status": "VALID_MACRO_TEST" if total_test_macro_events > 0 else "NOT_EVALUATED_NO_TEST_RELEASES",
+                "fold_breakdown": fold_macro_audit,
+            },
+            "econometric_diagnostics": {
+                "ns_contemporaneous_fit_rmse_bp": round(ns_fit_rmse_bp, 2),
+                "factor_rmse_ar1_bp": round(factor_ar1_rmse_bp, 2),
+                "factor_rmse_random_walk_bp": round(factor_rw_rmse_bp, 2),
+                "signal_clipping_frequency_pct": clipping_stats,
+                "mean_unclipped_signal_std": mean_unclipped_stats,
+                "signal_correlations": sig_corr_matrix,
+                "residual_preserving_comparison": {
+                    "traditional_ns_spread_rmse_bp": all_model_metrics["Static_NS"]["2s10s Spread RMSE (bp)"],
+                    "residual_preserving_ns_spread_rmse_bp": all_model_metrics["Static_NS_Residual_Preserving"]["2s10s Spread RMSE (bp)"],
+                    "traditional_dns_spread_rmse_bp": all_model_metrics["DNS_Kalman"]["2s10s Spread RMSE (bp)"],
+                    "residual_preserving_dns_spread_rmse_bp": all_model_metrics["DNS_Kalman_Residual_Preserving"]["2s10s Spread RMSE (bp)"],
+                }
+            }
         }
         
         return {

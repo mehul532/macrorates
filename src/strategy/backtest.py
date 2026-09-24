@@ -506,23 +506,25 @@ class SyntheticDV01Backtest:
 
         # Primary strategy return series: daily net trading P&L / initial_capital
         daily_trading_ret = pnl_df["net_trading_pnl"] / self.initial_capital
-        trading_vol = float(daily_trading_ret.std() * np.sqrt(252.0))
+        daily_trading_std = float(daily_trading_ret.std())
+        trading_vol = float(daily_trading_std * np.sqrt(252.0))
         mean_trading_ret = float(daily_trading_ret.mean())
 
-        # Sharpe ratio on net trading return (undefined / NaN when risk is zero)
-        if trading_vol < 1e-10:
+        # Annualized Sharpe ratio on net trading return (undefined / NaN when risk is zero)
+        if daily_trading_std < 1e-10:
             sharpe = np.nan
         else:
-            sharpe = round(float((mean_trading_ret * np.sqrt(252.0)) / trading_vol), 3)
+            # Correctly annualized: (mean_daily * sqrt(252)) / std_daily == (mean_daily * 252) / annualized_vol
+            sharpe = round(float((mean_trading_ret * np.sqrt(252.0)) / daily_trading_std), 3)
             
-        # Sortino Ratio (coherent downside deviation on net trading return)
+        # Annualized Sortino Ratio (coherent downside deviation on net trading return)
         downside_diff = np.minimum(0.0, daily_trading_ret.values)
         downside_var = float(np.mean(downside_diff ** 2))
-        downside_std = float(np.sqrt(downside_var) * np.sqrt(252.0))
-        if downside_std < 1e-10:
+        downside_std_daily = float(np.sqrt(downside_var))
+        if downside_std_daily < 1e-10:
             sortino = np.nan
         else:
-            sortino = round(float((mean_trading_ret * np.sqrt(252.0)) / downside_std), 3)
+            sortino = round(float((mean_trading_ret * np.sqrt(252.0)) / downside_std_daily), 3)
             
         # Drawdowns
         running_max = equity.cummax()
@@ -534,7 +536,15 @@ class SyntheticDV01Backtest:
         total_contracts = trade_ledger.total_contract_turnover() if trade_ledger else 0
         pnl_turnover = round(total_net_trading / total_contracts, 2) if total_contracts > 0 else np.nan
 
-        win_rate = float((returns > 0.0).sum() / max(1, (returns != 0.0).sum()))
+        # Win rate / hit rate derived strictly from active trading days (excluding cash interest)
+        trading_active_days = int((pnl_df["net_trading_pnl"] != 0.0).sum())
+        if trading_active_days == 0:
+            win_rate = np.nan
+        else:
+            trading_win_days = int((pnl_df["net_trading_pnl"] > 0.0).sum())
+            win_rate = round(float(trading_win_days / trading_active_days) * 100.0, 2)
+            
+        collateral_win_rate = round(float((returns > 0.0).sum() / max(1, (returns != 0.0).sum())) * 100.0, 2)
         
         return {
             "total_return_pct": round(total_return * 100.0, 2),
@@ -544,7 +554,9 @@ class SyntheticDV01Backtest:
             "sortino_ratio": sortino,
             "max_drawdown_pct": round(max_drawdown * 100.0, 2),
             "calmar_ratio": calmar,
-            "win_rate_pct": round(win_rate * 100.0, 2),
+            "win_rate_pct": win_rate,
+            "hit_rate_pct": win_rate,
+            "collateral_win_rate_pct": collateral_win_rate,
             "contract_turnover_lots": int(total_contracts),
             "pnl_turnover_usd_per_lot": pnl_turnover,
             "total_gross_pnl_usd": round(total_gross, 2),
