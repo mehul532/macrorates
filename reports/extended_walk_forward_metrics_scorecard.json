@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "git_commit": "643ddea4237e61413c91ea9e7ece7dd64b0576b6",
+    "git_commit": "7f1022cbbe7ce1917e3c20fc8b17d47018436a61",
     "data_checksums": {
       "yield_panel": "6c5f1abbb87b7697",
       "factor_panel": "fa37ee083dfe77ca",
@@ -50,7 +50,7 @@
       },
       "DNS_Kalman_Macro": {
         "model_id": "DNS_Kalman_Macro",
-        "status": "VALID_EVALUATION",
+        "status": "NOT_EVALUATED (NO_TEST_RELEASES)",
         "total_records": 627,
         "counts": {
           "GENERATED": 0,
@@ -59,7 +59,9 @@
           "FAILED": 0,
           "INVALIDATED": 0
         },
-        "reasons": [],
+        "reasons": [
+          "COPIED_DNS_CURVE_FORECAST"
+        ],
         "rmse": 0.1282893883126024
       },
       "GBM": {
@@ -123,7 +125,7 @@
       "total_training_events": 301,
       "total_test_events": 0,
       "nonzero_macro_days": 0,
-      "evaluation_status": "NOT_EVALUATED_NO_TEST_RELEASES",
+      "evaluation_status": "NOT_EVALUATED (NO_TEST_RELEASES)",
       "fold_breakdown": [
         {
           "fold_id": 0,
@@ -149,6 +151,39 @@
       "ns_contemporaneous_fit_rmse_bp": 12.03,
       "factor_rmse_ar1_bp": 8.89,
       "factor_rmse_random_walk_bp": 8.67,
+      "observable_2s10s_spread_decomposition": {
+        "total_spread_rmse_bp": 28.82,
+        "total_spread_mse_bp2": 830.39,
+        "factor_dynamics_spread_rmse_bp": 2.98,
+        "factor_dynamics_spread_mse_bp2": 8.9,
+        "cross_sectional_fit_spread_rmse_bp": 28.46,
+        "cross_sectional_fit_spread_mse_bp2": 810.21,
+        "cross_term_cov_bp2": 11.28,
+        "sum_components_mse_bp2": 830.39,
+        "identity_holds": true
+      },
+      "raw_signal_threshold_exceedance_pct": {
+        "Random_Walk": 0.0,
+        "PCA_VAR": 47.37,
+        "Static_NS": 100.0,
+        "DNS_Kalman": 100.0,
+        "DNS_Kalman_Macro": 100.0,
+        "GBM": 100.0,
+        "DNS_Scaled_60": 100.0,
+        "Static_NS_Residual_Preserving": 0.0,
+        "DNS_Kalman_Residual_Preserving": 0.0
+      },
+      "actual_clipping_frequency_pct": {
+        "Random_Walk": 0.0,
+        "PCA_VAR": 47.37,
+        "Static_NS": 100.0,
+        "DNS_Kalman": 100.0,
+        "DNS_Kalman_Macro": 100.0,
+        "GBM": 100.0,
+        "DNS_Scaled_60": 100.0,
+        "Static_NS_Residual_Preserving": 0.0,
+        "DNS_Kalman_Residual_Preserving": 0.0
+      },
       "signal_clipping_frequency_pct": {
         "Random_Walk": 0.0,
         "PCA_VAR": 47.37,
@@ -436,9 +471,9 @@
       "Forecast Status": "CONTROL (SCALED_DNS)",
       "Sample Size (Days)": 57,
       "OOS Curve RMSE (bp)": 12.83,
-      "2Y Curve RMSE (bp)": 12.9,
-      "5Y Curve RMSE (bp)": 12.9,
-      "10Y Curve RMSE (bp)": 12.9,
+      "2Y Curve RMSE (bp)": 16.52,
+      "5Y Curve RMSE (bp)": 11.17,
+      "10Y Curve RMSE (bp)": 14.48,
       "2s10s Spread RMSE (bp)": 29.9,
       "2s5s10s Fly RMSE (bp)": 22.38,
       "Factor Forecast RMSE (bp)": 29.9,
@@ -688,9 +723,9 @@
       "Forecast Status": "CONTROL (SCALED_DNS)",
       "Sample Size (Days)": 57,
       "OOS Curve RMSE (bp)": 12.83,
-      "2Y Curve RMSE (bp)": 12.9,
-      "5Y Curve RMSE (bp)": 12.9,
-      "10Y Curve RMSE (bp)": 12.9,
+      "2Y Curve RMSE (bp)": 16.52,
+      "5Y Curve RMSE (bp)": 11.17,
+      "10Y Curve RMSE (bp)": 14.48,
       "2s10s Spread RMSE (bp)": 29.9,
       "2s5s10s Fly RMSE (bp)": 22.38,
       "Factor Forecast RMSE (bp)": 29.9,

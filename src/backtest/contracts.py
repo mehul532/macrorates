@@ -275,7 +275,10 @@ class ForecastLedger:
 
         # Determine primary status
         if counts[ForecastStatus.SCORED.value] > 0 and counts[ForecastStatus.UNAVAILABLE.value] == 0:
-            status = "VALID_EVALUATION"
+            if all(r.reason == "COPIED_DNS_CURVE_FORECAST" for r in matching):
+                status = "NOT_EVALUATED (NO_TEST_RELEASES)"
+            else:
+                status = "VALID_EVALUATION"
         elif counts[ForecastStatus.UNAVAILABLE.value] > 0:
             status = "UNAVAILABLE"
         elif counts[ForecastStatus.FAILED.value] > 0:

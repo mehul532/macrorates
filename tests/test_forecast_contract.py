@@ -224,13 +224,18 @@ def test_walk_forward_harness_genuine_forecasts_and_unavailable_nan():
     table = eval_res["baseline_table"]
     ledger = eval_res["forecast_ledger"]
 
-    # Models 1-5 have genuine rolling one-step evaluations (Prompt 2)
-    genuine_models = ["Random + Walk", "PCA + VAR", "Static + NS", "DNS + Kalman", "DNS + Kalman + Macro"]
-    for m in genuine_models:
+    # Models 1-4 have genuine rolling one-step evaluations (Prompt 2)
+    evaluated_models = ["Random + Walk", "PCA + VAR", "Static + NS", "DNS + Kalman"]
+    for m in evaluated_models:
         rmse = table.loc[m, "OOS Curve RMSE (bp)"]
         assert not np.isnan(rmse), f"Expected numeric RMSE for genuine model {m}, got NaN"
         assert rmse > 0.0, f"Expected positive RMSE for {m}, got {rmse}"
         assert table.loc[m, "Forecast Status"] == "EVALUATED"
+
+    # DNS + Kalman + Macro has numeric curve RMSE from copied DNS forecasts but audited status when test releases are 0
+    macro_rmse = table.loc["DNS + Kalman + Macro", "OOS Curve RMSE (bp)"]
+    assert not np.isnan(macro_rmse) and macro_rmse > 0.0
+    assert table.loc["DNS + Kalman + Macro", "Forecast Status"] == "NOT_EVALUATED (NO_TEST_RELEASES)"
 
     # GBM without features must remain UNAVAILABLE with NaN RMSE
     assert np.isnan(table.loc["GBM", "OOS Curve RMSE (bp)"]), (

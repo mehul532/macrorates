@@ -224,6 +224,12 @@ class WalkForwardHarness:
         factor_ar1_sq_errors = []
         fold_macro_audit = []
         
+        # Observable 2s10s spread error decomposition: e_spread = u_factor_spread + u_fit_spread
+        spread_decomp_total_sq = []
+        spread_decomp_factor_sq = []
+        spread_decomp_fit_sq = []
+        spread_decomp_cross = []
+        
         for f_idx, (train_dates, test_dates) in enumerate(folds):
             # Define explicit rolling 1-step forecast origin-target pairs:
             # Origin t_0 = train_dates[-1] predicts target test_dates[0].
@@ -385,6 +391,20 @@ class WalkForwardHarness:
             Lambda_ns = nelson_siegel_loadings(maturities, lambda_param=0.7308)
             y_fit_ns = (Lambda_ns @ factors_obs_ns.T).T
             contemp_fit_sq_errors.extend(((y_test.values - y_fit_ns) ** 2).flatten())
+
+            # Observable 2s10s spread error decomposition: e_spread = u_factor_spread + u_fit_spread
+            s_act_arr = spreads_act["2s10s"]
+            s_pred_ns_arr = spreads_ns["2s10s"]
+            s_fit_ns_arr = compute_observable_spreads(y_fit_ns, tenor_cols)["2s10s"]
+            
+            e_total_bp = (s_act_arr - s_pred_ns_arr) * 100.0
+            u_factor_bp = (s_fit_ns_arr - s_pred_ns_arr) * 100.0
+            u_fit_bp = (s_act_arr - s_fit_ns_arr) * 100.0
+            
+            spread_decomp_total_sq.extend((e_total_bp ** 2).tolist())
+            spread_decomp_factor_sq.extend((u_factor_bp ** 2).tolist())
+            spread_decomp_fit_sq.extend((u_fit_bp ** 2).tolist())
+            spread_decomp_cross.extend((2.0 * u_factor_bp * u_fit_bp).tolist())
             
             # 2. Factor Random Walk vs AR(1) dynamics
             b_train_last_ns = np.linalg.pinv(Lambda_ns) @ y_train.values[-1]
@@ -511,7 +531,8 @@ class WalkForwardHarness:
             # Identical forecast curve and spread RMSE to DNS_Kalman, but scaled to 60% risk exposure
             curve_sq_errors["DNS_Scaled_60"].extend(((y_test.values - y_pred_kf) ** 2).flatten())
             for c_idx, c in enumerate(tenor_cols):
-                per_tenor_sq_errors["DNS_Scaled_60"][c].extend(sq_kf)
+                sq_err_c = ((y_test.iloc[:, c_idx].values - y_pred_kf[:, c_idx]) ** 2).tolist()
+                per_tenor_sq_errors["DNS_Scaled_60"][c].extend(sq_err_c)
             if "2s10s" in spreads_kf and "2s10s" in spreads_act:
                 spread_2s10s_sq_errors["DNS_Scaled_60"].extend(((spreads_act["2s10s"] - spreads_kf["2s10s"]) ** 2).flatten())
                 factor_sq_errors["DNS_Scaled_60"].extend(((spreads_act["2s10s"] - spreads_kf["2s10s"]) ** 2).flatten())
@@ -538,10 +559,12 @@ class WalkForwardHarness:
                 yield_df=y_train,
             )
             
+            # Join macro releases by availability at decision origin (orig_dates)
+            # Releases on orig_dt (e.g. 8:30 AM / 14:00) are available at orig_dt close; target-date releases are future.
             macro_sub = self.macro_df[
-                (self.macro_df["date"] >= test_dates[0]) & (self.macro_df["date"] <= test_dates[-1])
+                (self.macro_df["date"] >= orig_dates[0]) & (self.macro_df["date"] <= orig_dates[-1])
             ]
-            macro_impulse = pd.Series(0.0, index=test_dates)
+            macro_impulse = pd.Series(0.0, index=orig_dates)
             for _, m_row in macro_sub.iterrows():
                 dt = m_row["date"]
                 ind = m_row.get("indicator")
@@ -557,10 +580,11 @@ class WalkForwardHarness:
             nonzero_macro_days = int((macro_impulse != 0.0).sum())
             fold_macro_audit[-1]["nonzero_macro_days"] = nonzero_macro_days
             
-            sig_macro_arr = np.clip(0.6 * sig_kf_arr + 0.4 * (macro_impulse.values / train_spread_std), -1.0, 1.0)
+            macro_scale = macro_impulse.loc[orig_dates].values / train_spread_std
+            sig_macro_arr = np.clip(0.6 * sig_kf_arr + 0.4 * macro_scale, -1.0, 1.0)
             sig_macro_dns = pd.Series(sig_macro_arr, index=orig_dates)
             oos_signals["DNS_Kalman_Macro"].append(sig_macro_dns)
-            raw_macro = 0.6 * raw_kf + 0.4 * (macro_impulse.values / train_spread_std)
+            raw_macro = 0.6 * raw_kf + 0.4 * macro_scale
             raw_signals["DNS_Kalman_Macro"].extend(raw_macro.tolist())
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
@@ -577,6 +601,7 @@ class WalkForwardHarness:
                         forecast=float(y_pred_kf[k, c_idx]),
                         actual=float(y_test.iloc[k, c_idx]),
                         status=ForecastStatus.SCORED,
+                        reason="COPIED_DNS_CURVE_FORECAST" if nonzero_macro_days == 0 else "MACRO_CONDITIONED",
                     ))
 
             # --- MODEL 6: GRADIENT BOOSTED MODEL (GBM) ---
@@ -776,14 +801,18 @@ class WalkForwardHarness:
                 "Collateral Net PnL ($)": met.get("total_collateral_pnl_usd", met.get("total_net_pnl_usd", 0.0)),
             }
             
-        # Build baseline_table strictly for the 6 primary evaluated models
-        baseline_rows = [all_model_metrics[m] for m in models]
-        baseline_table = pd.DataFrame(baseline_rows).set_index("Model / Forecast Method")
-
         # Macro audit statistics
         total_test_macro_events = sum(f.get("test_event_count", 0) for f in fold_macro_audit)
         total_train_macro_events = sum(f.get("training_event_count", 0) for f in fold_macro_audit)
         total_nonzero_macro_days = sum(f.get("nonzero_macro_days", 0) for f in fold_macro_audit)
+
+        # Synchronize macro evaluation status across baseline_table, common_sample_table, and ledger
+        if total_test_macro_events == 0 and "DNS_Kalman_Macro" in all_model_metrics:
+            all_model_metrics["DNS_Kalman_Macro"]["Forecast Status"] = "NOT_EVALUATED (NO_TEST_RELEASES)"
+
+        # Build baseline_table strictly for the 6 primary evaluated models
+        baseline_rows = [all_model_metrics[m] for m in models]
+        baseline_table = pd.DataFrame(baseline_rows).set_index("Model / Forecast Method")
 
         # Build common_sample_table containing evaluated models, risk control, diagnostics, and Cash Only
         ROLE_MAP = {
@@ -889,14 +918,43 @@ class WalkForwardHarness:
         factor_rw_rmse_bp = float(np.sqrt(np.mean(factor_rw_sq_errors)) * 100.0) if factor_rw_sq_errors else np.nan
         factor_ar1_rmse_bp = float(np.sqrt(np.mean(factor_ar1_sq_errors)) * 100.0) if factor_ar1_sq_errors else np.nan
 
+        # Exact observable 2s10s spread decomposition: e_s = u_factor + u_fit
+        if spread_decomp_total_sq:
+            tot_mse = float(np.mean(spread_decomp_total_sq))
+            fac_mse = float(np.mean(spread_decomp_factor_sq))
+            fit_mse = float(np.mean(spread_decomp_fit_sq))
+            cross_term = float(np.mean(spread_decomp_cross))
+            tot_rmse = float(np.sqrt(tot_mse))
+            fac_rmse = float(np.sqrt(fac_mse))
+            fit_rmse = float(np.sqrt(fit_mse))
+            decomp_dict = {
+                "total_spread_rmse_bp": round(tot_rmse, 2),
+                "total_spread_mse_bp2": round(tot_mse, 2),
+                "factor_dynamics_spread_rmse_bp": round(fac_rmse, 2),
+                "factor_dynamics_spread_mse_bp2": round(fac_mse, 2),
+                "cross_sectional_fit_spread_rmse_bp": round(fit_rmse, 2),
+                "cross_sectional_fit_spread_mse_bp2": round(fit_mse, 2),
+                "cross_term_cov_bp2": round(cross_term, 2),
+                "sum_components_mse_bp2": round(fac_mse + fit_mse + cross_term, 2),
+                "identity_holds": abs(tot_mse - (fac_mse + fit_mse + cross_term)) < 1e-4,
+            }
+        else:
+            decomp_dict = {}
+
+        raw_threshold_exceedance_stats = {}
+        actual_clipping_stats = {}
         clipping_stats = {}
         mean_unclipped_stats = {}
         for m in all_eval_models:
             raw_arr = np.array(raw_signals[m])
             if len(raw_arr) > 0:
-                clipping_stats[m] = round(float(np.mean(np.abs(raw_arr) >= 0.999) * 100.0), 2)
+                raw_threshold_exceedance_stats[m] = round(float(np.mean(np.abs(raw_arr) >= 1.0 - 1e-9) * 100.0), 2)
+                actual_clipping_stats[m] = round(float(np.mean(np.abs(raw_arr) > 1.0 + 1e-9) * 100.0), 2)
+                clipping_stats[m] = actual_clipping_stats[m]
                 mean_unclipped_stats[m] = round(float(np.mean(np.abs(raw_arr))), 3)
             else:
+                raw_threshold_exceedance_stats[m] = np.nan
+                actual_clipping_stats[m] = np.nan
                 clipping_stats[m] = np.nan
                 mean_unclipped_stats[m] = np.nan
 
@@ -931,13 +989,16 @@ class WalkForwardHarness:
                 "total_training_events": total_train_macro_events,
                 "total_test_events": total_test_macro_events,
                 "nonzero_macro_days": total_nonzero_macro_days,
-                "evaluation_status": "VALID_MACRO_TEST" if total_test_macro_events > 0 else "NOT_EVALUATED_NO_TEST_RELEASES",
+                "evaluation_status": "VALID_MACRO_TEST" if total_test_macro_events > 0 else "NOT_EVALUATED (NO_TEST_RELEASES)",
                 "fold_breakdown": fold_macro_audit,
             },
             "econometric_diagnostics": {
                 "ns_contemporaneous_fit_rmse_bp": round(ns_fit_rmse_bp, 2),
                 "factor_rmse_ar1_bp": round(factor_ar1_rmse_bp, 2),
                 "factor_rmse_random_walk_bp": round(factor_rw_rmse_bp, 2),
+                "observable_2s10s_spread_decomposition": decomp_dict,
+                "raw_signal_threshold_exceedance_pct": raw_threshold_exceedance_stats,
+                "actual_clipping_frequency_pct": actual_clipping_stats,
                 "signal_clipping_frequency_pct": clipping_stats,
                 "mean_unclipped_signal_std": mean_unclipped_stats,
                 "signal_correlations": sig_corr_matrix,

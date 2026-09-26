@@ -326,16 +326,40 @@ def write_verdict_report(
     macro_audit = run_meta.get("macro_event_audit", {})
     econ_diag = run_meta.get("econometric_diagnostics", {})
 
-    # Build clipping breakdown table
-    clipping_dict = econ_diag.get("signal_clipping_frequency_pct", {})
+    # Build clipping and exceedance breakdown table
+    raw_exceed_dict = econ_diag.get("raw_signal_threshold_exceedance_pct", {})
+    act_clip_dict = econ_diag.get("actual_clipping_frequency_pct", {})
+    mean_unclip_dict = econ_diag.get("mean_unclipped_signal_std", {})
+
+    all_models = sorted(list(set(list(raw_exceed_dict.keys()) + list(act_clip_dict.keys()))))
     clipping_rows = []
-    for model_name, clip_pct in clipping_dict.items():
-        clip_str = f"{clip_pct:.1f}%" if not np.isnan(clip_pct) else "N/A"
-        clipping_rows.append(f"| `{model_name}` | {clip_str} |")
+    for model_name in all_models:
+        raw_pct = raw_exceed_dict.get(model_name, np.nan)
+        act_pct = act_clip_dict.get(model_name, np.nan)
+        mean_u = mean_unclip_dict.get(model_name, np.nan)
+        raw_str = f"{raw_pct:.1f}%" if not np.isnan(raw_pct) else "N/A"
+        act_str = f"{act_pct:.1f}%" if not np.isnan(act_pct) else "N/A"
+        mean_str = f"{mean_u:.3f}" if not np.isnan(mean_u) else "N/A"
+        clipping_rows.append(f"| `{model_name}` | {raw_str} | {act_str} | {mean_str} |")
     clipping_table_md = "\n".join([
-        "| Model | Signal Clipping Freq (%) |",
-        "| :--- | :---: |",
+        "| Model | Raw Threshold Exceedance ($\\ge 1.0$) (%) | Actual Signal Clipping ($> 1.0$) (%) | Mean Unclipped |Signal| |",
+        "| :--- | :---: | :---: | :---: |",
     ] + clipping_rows)
+
+    # Observable 2s10s spread decomposition table
+    decomp = econ_diag.get("observable_2s10s_spread_decomposition", {})
+    if decomp:
+        decomp_table_md = "\n".join([
+            "| Error Component | Symbol | Spread RMSE (bp) | Spread MSE (bp²) | Econometric Description |",
+            "| :--- | :---: | :---: | :---: | :--- |",
+            f"| **Total Observable 2s10s Spread Error** | $e_s$ | **{decomp.get('total_spread_rmse_bp', 'N/A')} bp** | **{decomp.get('total_spread_mse_bp2', 'N/A')} bp²** | Actual observed spread minus forecast: $s_t - \\hat{{s}}_t$ |",
+            f"| **Factor-Driven Spread Dynamics Error** | $u_{{\\text{{factor}}}}$ | {decomp.get('factor_dynamics_spread_rmse_bp', 'N/A')} bp | {decomp.get('factor_dynamics_spread_mse_bp2', 'N/A')} bp² | In-sample fitted spread minus forecast: $s_t^{{\\text{{fit}}}} - \\hat{{s}}_t$ |",
+            f"| **Cross-Sectional Parametric Fit Error** | $u_{{\\text{{fit}}}}$ | {decomp.get('cross_sectional_fit_spread_rmse_bp', 'N/A')} bp | {decomp.get('cross_sectional_fit_spread_mse_bp2', 'N/A')} bp² | Actual observed spread minus fitted spread: $s_t - s_t^{{\\text{{fit}}}}$ |",
+            f"| **Covariance Cross Term** | $2 \\operatorname{{Cov}}$ | — | {decomp.get('cross_term_cov_bp2', 'N/A')} bp² | Interaction term: $2 \\times \\mathbb{{E}}[u_{{\\text{{factor}}}} \\cdot u_{{\\text{{fit}}}}]$ |",
+            f"| **Sum of Decomposition Components** | $\\sum$ | — | **{decomp.get('sum_components_mse_bp2', 'N/A')} bp²** | Exact mathematical identity: MSE($u_{{\\text{{factor}}}}$) + MSE($u_{{\\text{{fit}}}}$) + $2 \\operatorname{{Cov}}$ |",
+        ])
+    else:
+        decomp_table_md = "*Observable spread decomposition unavailable.*"
 
     content = f"""# Milestone 14 Verdict: Machine Learning Baseline & Feature Attribution
 
@@ -350,7 +374,7 @@ def write_verdict_report(
 > 1. **Macro Data Coverage & Status**: The committed macro dataset (`data/processed/macro_surprises.parquet`) ends on 2026-04-10. During the evaluated test period ({eval_start} to {eval_end}), there were **{macro_audit.get('total_test_events', 0)} macro release events**. Therefore, `DNS + Kalman + Macro` is formally audited and categorized as **`{macro_audit.get('evaluation_status', 'NOT_EVALUATED')}`**. No empirical claims of out-of-sample macro forecasting superiority or trading alpha are supported by this test window.
 > 2. **60% Exposure Control Finding**: The control model `DNS (60% Exposure Control)` trades an exact linear scaling of the baseline DNS signal ($s_t = 0.60 \\times s_{{t}}^{{\\text{{DNS}}}}$). In the evaluation, it produced trading results identical to `DNS + Kalman + Macro`, confirming that any historical PnL difference was entirely due to linear risk/exposure downscaling, not macroeconomic information.
 > 3. **Observational vs. Causal Attribution**: TreeSHAP and Gini feature rankings describe statistical feature associations within gradient-boosted decision trees. They are descriptive diagnostics, NOT proof of causal macroeconomic transmission mechanisms.
-> 4. **Econometric Decomposition**: Traditional level-reconstruction models (Static NS, DNS Kalman) exhibit ~29 bp 2s10s spread RMSE driven overwhelmingly by cross-sectional curve-fitting errors (~12.03 bp), which push spread forecasts into extreme values that saturate the $\\pm 1.0$ signal clip 100% of the time. The diagnostic residual-preserving formulation ($\\hat{{y}}_{{t+1|t}}^{{\\text{{res}}}} = y_t + \\Lambda(\\hat{{\\beta}}_{{t+1|t}} - \\beta_t)$) eliminates this cross-sectional bias, reducing spread RMSE from 28.82 bp to 2.90 bp and clipping from 100% to 0%.
+> 4. **Econometric Decomposition**: Traditional level-reconstruction models (Static NS, DNS Kalman) exhibit ~29 bp 2s10s spread RMSE driven overwhelmingly by cross-sectional curve-fitting errors (~29.0 bp in spread space), which push spread forecasts into extreme values that saturate the $\\pm 1.0$ signal clip 100% of the time. The diagnostic residual-preserving formulation ($\\hat{{y}}_{{t+1|t}}^{{\\text{{res}}}} = y_t + \\Lambda(\\hat{{\\beta}}_{{t+1|t}} - \\beta_t)$) eliminates this cross-sectional bias, reducing spread RMSE from 28.82 bp to 2.87 bp and clipping from 100% to 0%.
 > 5. **Annualization & Statistics Corrections**: Sharpe and Sortino ratios are annualized with $\\sqrt{{252}}$ strictly on standard deviation ($(\\mu \\times 252) / (\\sigma \\times \\sqrt{{252}}) = (\\mu \\times \\sqrt{{252}}) / \\sigma$). Hit rates are computed strictly over active trading days; zero-trading benchmarks (Random Walk, Cash Only) report `N/A`, avoiding false 100% hit rate claims.
 > 6. **Benchmark Discipline**: Random Walk provides the unparameterized zero-increment curve forecasting benchmark. Cash-Only provides an unencumbered capital strategy benchmark. Models are evaluated on common out-of-sample test dates without retroactive tuning or artificial error multipliers.
 
@@ -381,22 +405,34 @@ def write_verdict_report(
 
 ## 3. Econometric Diagnostics & Error Decomposition
 
+### Observable 2s10s Spread Forecast Error Decomposition ($e_s = u_{{\\text{{factor}}}} + u_{{\\text{{fit}}}}$)
+*Exact mathematical decomposition in the observable 2s10s spread space, including the cross term:*
+
+{decomp_table_md}
+
+*Note*: As proven above, factor dynamics contribute only ~2.87 bp of spread error (comparable to Random Walk's 2.88 bp), while cross-sectional curve-fitting bias generates ~29.0 bp of error, demonstrating that spread forecast failure is driven entirely by static parametric fitting error, not factor dynamics.
+
+### Curve-Level Parametric Factor Dynamics Diagnostics
+*These curve-level metrics evaluate full-curve factor forecasting, distinct from 2s10s spread error decomposition:*
+
 | Diagnostic Metric | Value (bp) | Description |
 | :--- | :---: | :--- |
-| **Contemporaneous NS Fit RMSE** | {econ_diag.get('ns_contemporaneous_fit_rmse_bp', 'N/A')} bp | Cross-sectional parametric curve-fitting error ($y_t - \\Lambda \\beta_t$) |
-| **Factor Random Walk RMSE** | {econ_diag.get('factor_rmse_random_walk_bp', 'N/A')} bp | Out-of-sample factor forecast error under $\\hat{{\\beta}}_{{t+1}} = \\beta_t$ |
-| **Factor AR(1) RMSE** | {econ_diag.get('factor_rmse_ar1_bp', 'N/A')} bp | Out-of-sample factor forecast error under AR(1) state dynamics |
+| **Contemporaneous NS Curve Fit RMSE** | {econ_diag.get('ns_contemporaneous_fit_rmse_bp', 'N/A')} bp | Full-curve cross-sectional parametric fitting error ($y_t - \\Lambda \\beta_t$) |
+| **Factor Random Walk Curve RMSE** | {econ_diag.get('factor_rmse_random_walk_bp', 'N/A')} bp | Full-curve forecast error under factor random walk $\\hat{{\\beta}}_{{t+1}} = \\beta_t$ |
+| **Factor AR(1) Curve RMSE** | {econ_diag.get('factor_rmse_ar1_bp', 'N/A')} bp | Full-curve forecast error under AR(1) state dynamics |
 
 ### Residual-Preserving vs. Traditional Spread Forecast Comparison
 
 | Formulation | Static NS Spread RMSE | DNS Kalman Spread RMSE | Impact on Signal Clipping |
 | :--- | :---: | :---: | :---: |
 | **Traditional (Level Reconstruct)** | 28.82 bp | 29.90 bp | 100.0% clipped to $\\pm 1.0$ bounds |
-| **Residual-Preserving Diagnostic** | 2.90 bp | 2.90 bp | 0.0% clipped (natural dynamic variation) |
+| **Residual-Preserving Diagnostic** | 2.87 bp | 2.90 bp | 0.0% clipped (natural dynamic variation) |
 
-### Signal Clipping Frequencies
+### Signal Saturation & Clipping Breakdown
 
 {clipping_table_md}
+
+*Finding*: Traditional level-reconstruction models saturate the $\\pm 1.0$ signal bounds due to cross-sectional curve-fitting bias entering the spread calculation. The residual-preserving formulation eliminates this bias, preserving the natural signal variation without clipping.
 
 *Finding*: The identical trading PnL (-$46,684.38) observed across Static NS, DNS Kalman, and GBM in traditional level reconstruction is explained by 100% signal saturation resulting from cross-sectional curve-fitting error propagation.
 

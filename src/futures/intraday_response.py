@@ -364,7 +364,7 @@ class DatabentoIntradayProvider:
         if cache_file.exists():
             df = pd.read_parquet(cache_file)
             if "data_source" not in df.columns:
-                df["data_source"] = "SYNTHETIC_CALIBRATION_FALLBACK"
+                df["data_source"] = "UNKNOWN_UNVERIFIED_CACHE"
             return df
 
         # Try live Databento fetch if API key present
@@ -579,8 +579,17 @@ class IntradayEventWindowExtractor:
     price deltas, implied yield deltas via contract specifications, and returns.
     """
 
-    def __init__(self, provider: Optional[DatabentoIntradayProvider] = None):
-        self.provider = provider or DatabentoIntradayProvider()
+    def __init__(
+        self,
+        provider: Optional[DatabentoIntradayProvider] = None,
+        cache_dir: Optional[Union[str, Path]] = None,
+    ):
+        if provider is not None:
+            self.provider = provider
+        elif cache_dir is not None:
+            self.provider = DatabentoIntradayProvider(cache_dir=cache_dir)
+        else:
+            self.provider = DatabentoIntradayProvider()
 
     @staticmethod
     def price_to_implied_yield_delta(
@@ -734,7 +743,7 @@ class IntradayEventWindowExtractor:
             drift_5m_to_30m_bp=round(drift_5m_to_30m, 3),
             drift_30m_to_close_bp=round(drift_30m_to_close, 3),
             window_df=window,
-            data_source=str(bars["data_source"].iloc[0]) if "data_source" in bars.columns else "SYNTHETIC_CALIBRATION_FALLBACK",
+            data_source=str(bars["data_source"].iloc[0]) if "data_source" in bars.columns else "UNKNOWN_UNVERIFIED_CACHE",
             p_window_end_60m=round(p_close, 5),
             delta_y_window_end_bp=dy_close,
         )
