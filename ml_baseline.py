@@ -303,14 +303,20 @@ def write_verdict_report(
     stype = ml_eval["shap_data"].get("type", "unknown")
     if stype == "tree_shap":
         shap_res = ml_eval["shap_data"].get("results", {})
-        top_lvl = ", ".join(list(shap_res.get("target_dLevel", {}).get("mean_abs_shap", {}).head(3).index))
-        top_slp = ", ".join(list(shap_res.get("target_dSlope", {}).get("mean_abs_shap", {}).head(3).index))
-        top_cur = ", ".join(list(shap_res.get("target_dCurvature", {}).get("mean_abs_shap", {}).head(3).index))
+        lvl_s = shap_res.get("target_dLevel", {}).get("mean_abs_shap")
+        top_lvl = ", ".join(list(lvl_s.head(3).index)) if hasattr(lvl_s, "head") else "N/A"
+        slp_s = shap_res.get("target_dSlope", {}).get("mean_abs_shap")
+        top_slp = ", ".join(list(slp_s.head(3).index)) if hasattr(slp_s, "head") else "N/A"
+        cur_s = shap_res.get("target_dCurvature", {}).get("mean_abs_shap")
+        top_cur = ", ".join(list(cur_s.head(3).index)) if hasattr(cur_s, "head") else "N/A"
     elif stype == "gini":
         imps = ml_eval["shap_data"].get("importances", {})
-        top_lvl = ", ".join(list(imps.get("target_dLevel", pd.Series()).head(3).index))
-        top_slp = ", ".join(list(imps.get("target_dSlope", pd.Series()).head(3).index))
-        top_cur = ", ".join(list(imps.get("target_dCurvature", pd.Series()).head(3).index))
+        lvl_s = imps.get("target_dLevel")
+        top_lvl = ", ".join(list(lvl_s.head(3).index)) if hasattr(lvl_s, "head") else "N/A"
+        slp_s = imps.get("target_dSlope")
+        top_slp = ", ".join(list(slp_s.head(3).index)) if hasattr(slp_s, "head") else "N/A"
+        cur_s = imps.get("target_dCurvature")
+        top_cur = ", ".join(list(cur_s.head(3).index)) if hasattr(cur_s, "head") else "N/A"
     else:
         top_lvl = top_slp = top_cur = "N/A"
 
@@ -327,20 +333,28 @@ def write_verdict_report(
     econ_diag = run_meta.get("econometric_diagnostics", {})
 
     # Extract dynamic metrics from common_sample_table and econometric diagnostics
+    # Extract dynamic metrics from common_sample_table and econometric diagnostics
     def get_table_val(model_display: str, col: str, default: float = np.nan) -> float:
         if model_display in common_sample_table.index and col in common_sample_table.columns:
             val = common_sample_table.loc[model_display, col]
             try:
-                return float(val)
+                f_val = float(val)
+                return f_val if not np.isnan(f_val) else default
             except (ValueError, TypeError):
                 return default
         return default
 
-    rw_spread_rmse = get_table_val("Random Walk (Curve Benchmark)", "2s10s Spread RMSE (bp)", 2.88)
-    trad_ns_spread_rmse = get_table_val("AR(1) Baseline (Static NS)", "2s10s Spread RMSE (bp)", 28.82)
-    trad_dns_spread_rmse = get_table_val("DNS + Kalman", "2s10s Spread RMSE (bp)", 29.90)
-    res_ns_spread_rmse = get_table_val("Static NS (Residual-Preserving Diagnostic)", "2s10s Spread RMSE (bp)", 2.90)
-    res_dns_spread_rmse = get_table_val("DNS + Kalman (Residual-Preserving Diagnostic)", "2s10s Spread RMSE (bp)", 2.90)
+    def fmt_bp(val: float, digits: int = 2) -> str:
+        return f"{val:.{digits}f} bp" if not np.isnan(val) else "N/A"
+
+    def fmt_num(val: float, digits: int = 2) -> str:
+        return f"{val:.{digits}f}" if not np.isnan(val) else "N/A"
+
+    rw_spread_rmse = get_table_val("Random Walk (Curve Benchmark)", "2s10s Spread RMSE (bp)", np.nan)
+    trad_ns_spread_rmse = get_table_val("AR(1) Baseline (Static NS)", "2s10s Spread RMSE (bp)", np.nan)
+    trad_dns_spread_rmse = get_table_val("DNS + Kalman", "2s10s Spread RMSE (bp)", np.nan)
+    res_ns_spread_rmse = get_table_val("Static NS (Residual-Preserving Diagnostic)", "2s10s Spread RMSE (bp)", np.nan)
+    res_dns_spread_rmse = get_table_val("DNS + Kalman (Residual-Preserving Diagnostic)", "2s10s Spread RMSE (bp)", np.nan)
 
     # Build clipping and exceedance breakdown table
     raw_exceed_dict = econ_diag.get("raw_signal_threshold_exceedance_pct", {})
@@ -348,8 +362,24 @@ def write_verdict_report(
     act_clip_dict = econ_diag.get("additional_clipping_frequency_pct", econ_diag.get("actual_clipping_frequency_pct", {}))
     sat_dict = econ_diag.get("final_position_saturation_pct", {})
     mean_unclip_dict = econ_diag.get("mean_unclipped_signal_std", {})
+    sat_bounds = econ_diag.get("saturation_bounds", {
+        "DNS_Scaled_60": 0.60,
+        "DNS_Kalman_Macro": 1.00,
+        "Random_Walk": 1.00,
+        "PCA_VAR": 1.00,
+        "Static_NS": 1.00,
+        "DNS_Kalman": 1.00,
+        "Static_NS_Residual_Preserving": 1.00,
+        "DNS_Kalman_Residual_Preserving": 1.00,
+        "GBM": 1.00,
+    })
 
-    all_models = sorted(list(set(list(raw_exceed_dict.keys()) + list(act_clip_dict.keys()))))
+    all_models = sorted(list(set(
+        list(raw_exceed_dict.keys()) +
+        list(inherited_clip_dict.keys()) +
+        list(act_clip_dict.keys()) +
+        list(sat_dict.keys())
+    )))
     clipping_rows = []
     for model_name in all_models:
         raw_pct = raw_exceed_dict.get(model_name, np.nan)
@@ -357,15 +387,17 @@ def write_verdict_report(
         act_pct = act_clip_dict.get(model_name, np.nan)
         sat_pct = sat_dict.get(model_name, np.nan)
         mean_u = mean_unclip_dict.get(model_name, np.nan)
+        bnd = sat_bounds.get(model_name, 1.00)
+        bnd_str = f"±{bnd:.2f}"
         raw_str = f"{raw_pct:.1f}%" if not np.isnan(raw_pct) else "N/A"
         inh_str = f"{inh_pct:.1f}%" if not np.isnan(inh_pct) else "0.0%"
         act_str = f"{act_pct:.1f}%" if not np.isnan(act_pct) else "N/A"
         sat_str = f"{sat_pct:.1f}%" if not np.isnan(sat_pct) else "N/A"
         mean_str = f"{mean_u:.3f}" if not np.isnan(mean_u) else "N/A"
-        clipping_rows.append(f"| `{model_name}` | {raw_str} | {inh_str} | {act_str} | {sat_str} | {mean_str} |")
+        clipping_rows.append(f"| `{model_name}` | {bnd_str} | {raw_str} | {inh_str} | {act_str} | {sat_str} | {mean_str} |")
     clipping_table_md = "\n".join([
-        "| Model | Raw Threshold Exceedance ($\\ge 1.0$) (%) | Inherited DNS Clipping (%) | Additional Stage Clipping (%) | Final Position Saturation (%) | Mean Unclipped |Input| |",
-        "| :--- | :---: | :---: | :---: | :---: | :---: |",
+        "| Model | Saturation Bound | Raw Threshold Exceedance ($\\ge 1.0$) (%) | Inherited DNS Clipping (%) | Additional Stage Clipping (%) | Final Position Saturation (%) | Mean Unclipped |Input| |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
     ] + clipping_rows)
 
     # Observable 2s10s spread decomposition table
@@ -387,6 +419,33 @@ def write_verdict_report(
     else:
         decomp_table_md = "*Observable spread decomposition unavailable.*"
 
+    trad_ns_clip = act_clip_dict.get("Static_NS", np.nan)
+    res_ns_clip = act_clip_dict.get("Static_NS_Residual_Preserving", np.nan)
+    if not np.isnan(trad_ns_clip) and not np.isnan(res_ns_clip):
+        clip_red_text = f"and signal clipping from {trad_ns_clip:.1f}% to {res_ns_clip:.1f}%"
+    else:
+        clip_red_text = "and mitigating excessive signal clipping"
+
+    trad_ns_rmse_str = fmt_num(trad_ns_spread_rmse, 1)
+    fit_spread_rmse_str = fmt_num(fit_spread_rmse, 1)
+    trad_ns_rmse_str2 = fmt_bp(trad_ns_spread_rmse, 2)
+    res_ns_rmse_str2 = fmt_bp(res_ns_spread_rmse, 2)
+
+    trad_clip_col_str = f"{trad_ns_clip:.1f}% clipped" if not np.isnan(trad_ns_clip) else "N/A"
+    res_clip_col_str = f"{res_ns_clip:.1f}% clipped" if not np.isnan(res_ns_clip) else "N/A"
+
+    pnl_col = "Trading Net PnL ($)" if "Trading Net PnL ($)" in common_sample_table.columns else "Collateral Net PnL ($)"
+    ns_pnl = get_table_val("AR(1) Baseline (Static NS)", pnl_col, np.nan)
+    dns_pnl = get_table_val("DNS + Kalman", pnl_col, np.nan)
+    gbm_pnl = get_table_val("GBM", pnl_col, np.nan)
+
+    if not np.isnan(ns_pnl) and not np.isnan(dns_pnl) and np.isclose(ns_pnl, dns_pnl) and (np.isnan(gbm_pnl) or np.isclose(ns_pnl, gbm_pnl)):
+        pnl_finding_str = f"*Finding*: The identical trading PnL (${ns_pnl:,.2f}) observed across traditional level reconstruction models is explained by signal saturation resulting from cross-sectional curve-fitting error propagation."
+    elif not np.isnan(ns_pnl) and not np.isnan(dns_pnl):
+        pnl_finding_str = f"*Finding*: Trading PnL across traditional level-reconstruction models (Static NS: ${ns_pnl:,.2f}, DNS Kalman: ${dns_pnl:,.2f}) reflects their respective signal saturation profiles."
+    else:
+        pnl_finding_str = "*Finding*: Trading PnL reflects model-specific signal saturation and risk scaling."
+
     content = f"""# Milestone 14 Verdict: Machine Learning Baseline & Feature Attribution
 
 **Author**: MacroRates Research Team  
@@ -397,10 +456,10 @@ def write_verdict_report(
 
 > [!IMPORTANT]
 > **RESEARCH INTEGRITY & CAUSALITY AUDIT DISCLOSURES**:
-> 1. **Macro Data Coverage & Status**: The committed macro dataset (`data/processed/macro_surprises.parquet`) ends on 2026-04-10. During the evaluated test period ({eval_start} to {eval_end}), there were **{macro_audit.get('total_calendar_events', macro_audit.get('total_test_events', 0))} calendar test events** and **{macro_audit.get('total_evaluated_decision_events', 0)} evaluated decision origin events**. Therefore, `DNS + Kalman + Macro` is formally audited and categorized as **`{macro_audit.get('evaluation_status', 'NOT_EVALUATED')}`**. No empirical claims of out-of-sample macro forecasting superiority or trading alpha are supported by this test window.
+> 1. **Macro Data Coverage & Status**: The committed macro dataset (`data/processed/macro_surprises.parquet`) ends on 2026-04-10. During the evaluated test period ({eval_start} to {eval_end}), there were **{macro_audit.get('total_calendar_events', macro_audit.get('total_test_events', 0))} calendar test events** and **{macro_audit.get('total_observed_decision_events', macro_audit.get('total_evaluated_decision_events', 0))} observed decision origin events**. Therefore, `DNS + Kalman + Macro` is formally audited and categorized as **`{macro_audit.get('evaluation_status', 'NOT_EVALUATED')}`**. No empirical claims of out-of-sample macro forecasting superiority or trading alpha are supported by this test window.
 > 2. **60% Exposure Control Finding**: The control model `DNS (60% Exposure Control)` trades an exact linear scaling of the baseline DNS signal ($s_t = 0.60 \\times s_{{t}}^{{\\text{{DNS}}}}$). In the evaluation, it produced trading results identical to `DNS + Kalman + Macro`, confirming that any historical PnL difference was entirely due to linear risk/exposure downscaling, not macroeconomic information.
 > 3. **Observational vs. Causal Attribution**: TreeSHAP and Gini feature rankings describe statistical feature associations within gradient-boosted decision trees. They are descriptive diagnostics, NOT proof of causal macroeconomic transmission mechanisms.
-> 4. **Econometric Decomposition**: Traditional level-reconstruction models (Static NS, DNS Kalman) exhibit ~{trad_ns_spread_rmse:.1f} bp 2s10s spread RMSE driven predominantly by cross-sectional curve-fitting errors (~{fit_spread_rmse:.1f} bp in spread space), which push spread forecasts into extreme values that saturate the $\\pm 1.0$ signal clip. The diagnostic residual-preserving formulation ($\\hat{{y}}_{{t+1|t}}^{{\\text{{res}}}} = y_t + \\Lambda(\\hat{{\\beta}}_{{t+1|t}} - \\beta_t)$) eliminates this cross-sectional bias, reducing spread RMSE from {trad_ns_spread_rmse:.2f} bp to {res_ns_spread_rmse:.2f} bp and signal clipping from 100% to 0%.
+> 4. **Econometric Decomposition**: Traditional level-reconstruction models (Static NS, DNS Kalman) exhibit ~{trad_ns_rmse_str} bp 2s10s spread RMSE driven predominantly by cross-sectional curve-fitting errors (~{fit_spread_rmse_str} bp in spread space), which push spread forecasts into extreme values that saturate the $\\pm 1.0$ signal clip. The diagnostic residual-preserving formulation ($\\hat{{y}}_{{t+1|t}}^{{\\text{{res}}}} = y_t + \\Lambda(\\hat{{\\beta}}_{{t+1|t}} - \\beta_t)$) eliminates this cross-sectional bias, reducing spread RMSE from {trad_ns_rmse_str2} to {res_ns_rmse_str2} {clip_red_text}.
 > 5. **Annualization & Statistics Corrections**: Sharpe and Sortino ratios are annualized with $\\sqrt{{252}}$ strictly on standard deviation ($(\\mu \\times 252) / (\\sigma \\times \\sqrt{{252}}) = (\\mu \\times \\sqrt{{252}}) / \\sigma$). Hit rates are computed strictly over active trading days; zero-trading benchmarks (Random Walk, Cash Only) report `N/A`, avoiding false 100% hit rate claims.
 > 6. **Benchmark Discipline**: Random Walk provides the unparameterized zero-increment curve forecasting benchmark. Cash-Only provides an unencumbered capital strategy benchmark. Models are evaluated on common out-of-sample test dates without retroactive tuning or artificial error multipliers.
 
@@ -422,10 +481,16 @@ def write_verdict_report(
 | :--- | :---: | :--- |
 | **Total Training Events** | {macro_audit.get('total_training_events', 0)} | Macro surprise releases available in training windows |
 | **Calendar Test Window Events** | {macro_audit.get('total_calendar_events', macro_audit.get('total_test_events', 0))} | Releases occurring within calendar test dates |
-| **Evaluated Decision Origin Events** | {macro_audit.get('total_evaluated_decision_events', 0)} | Releases available at evaluated decision origins (orig_dates) |
-| **Timestamp-Available Events** | {macro_audit.get('total_timestamp_available_events', 0)} | Releases verified available prior to market close |
+| **Observed Decision Origin Events** | {macro_audit.get('total_observed_decision_events', macro_audit.get('total_evaluated_decision_events', 0))} | Total release events evaluated at decision origins |
+| **Timestamp-Available Events** | {macro_audit.get('total_timestamp_available_events', 0)} | Releases verified available prior to market close (<= 16:00 ET) |
+| ↳ *Verified Timestamp Available* | {macro_audit.get('total_timestamp_verified_available_events', 0)} | Explicit timezone-verified timestamp <= 16:00 ET |
+| ↳ *Legacy Date-Only Assumed* | {macro_audit.get('total_legacy_date_only_assumed_events', 0)} | Legacy date-only releases without intraday timestamp |
+| **Post-Close Events** | {macro_audit.get('total_post_close_events', 0)} | Releases after 16:00 ET (unavailable for same-day decision) |
+| **Rolled to Next Decision Events** | {macro_audit.get('total_rolled_to_next_decision_events', 0)} | After-close releases rolled into subsequent decision origin |
 | **Usable Surprise Events** | {macro_audit.get('total_usable_surprise_events', 0)} | Releases with non-null numeric surprise |
-| **Eligible Coefficient Events** | {macro_audit.get('total_eligible_coefficient_events', 0)} | Releases with causal response beta estimated from training history |
+| **Eligible Coefficient Events** | {macro_audit.get('total_eligible_coefficient_events', 0)} | Releases with causal response beta estimated from training history ($N \\ge 8$) |
+| **Inadequate History Events** | {macro_audit.get('total_inadequate_history_events', 0)} | Releases where indicator has insufficient training history ($N < 8$) |
+| **Active Overlay Events** | {macro_audit.get('total_active_overlay_events', 0)} | Releases contributing nonzero macro position overlay |
 | **Nonzero Macro Days in Test** | {macro_audit.get('nonzero_macro_days', 0)} | Evaluated decision days where macro overlay was non-zero |
 | **Curve Forecast Provenance** | `{macro_audit.get('curve_forecast_provenance', 'COPIED_DNS_CURVE_FORECAST')}` | Independent provenance of yield curve predictions |
 | **Macro Strategy Status** | `{macro_audit.get('strategy_overlay_status', 'INACTIVE')}` | Operational status of macro overlay strategy |
@@ -442,7 +507,7 @@ def write_verdict_report(
 
 {decomp_table_md}
 
-*Note*: As proven above, factor dynamics contribute {fac_dynamics_rmse:.2f} bp of spread error (comparable to Random Walk's {rw_spread_rmse:.2f} bp), while cross-sectional curve-fitting error is the dominant contributor ({fit_spread_rmse:.2f} bp), demonstrating that spread forecast failure is driven predominantly by static parametric fitting error, not factor dynamics.
+*Note*: As proven above, factor dynamics contribute {fmt_bp(fac_dynamics_rmse)} of spread error (comparable to Random Walk's {fmt_bp(rw_spread_rmse)}), while cross-sectional curve-fitting error is the dominant contributor ({fmt_bp(fit_spread_rmse)}), demonstrating that spread forecast failure is driven predominantly by static parametric fitting error, not factor dynamics.
 
 ### Factor Dynamics Diagnostics (Factor-Coordinate Space)
 *These diagnostics evaluate state variable forecasting in factor-coordinate space, distinct from observable 2s10s spread error decomposition:*
@@ -457,8 +522,8 @@ def write_verdict_report(
 
 | Formulation | Static NS Spread RMSE | DNS Kalman Spread RMSE | Impact on Signal Clipping |
 | :--- | :---: | :---: | :---: |
-| **Traditional (Level Reconstruct)** | {trad_ns_spread_rmse:.2f} bp | {trad_dns_spread_rmse:.2f} bp | 100.0% clipped to $\\pm 1.0$ bounds |
-| **Residual-Preserving Diagnostic** | {res_ns_spread_rmse:.2f} bp | {res_dns_spread_rmse:.2f} bp | 0.0% clipped (natural dynamic variation) |
+| **Traditional (Level Reconstruct)** | {fmt_bp(trad_ns_spread_rmse)} | {fmt_bp(trad_dns_spread_rmse)} | {trad_clip_col_str} |
+| **Residual-Preserving Diagnostic** | {fmt_bp(res_ns_spread_rmse)} | {fmt_bp(res_dns_spread_rmse)} | {res_clip_col_str} |
 
 ### Signal Saturation & Clipping Breakdown
 
@@ -466,7 +531,7 @@ def write_verdict_report(
 
 *Finding*: Traditional level-reconstruction models saturate the $\\pm 1.0$ signal bounds due to cross-sectional curve-fitting bias entering the spread calculation. The residual-preserving formulation eliminates this bias, preserving the natural signal variation without clipping.
 
-*Finding*: The identical trading PnL (-$46,684.38) observed across Static NS, DNS Kalman, and GBM in traditional level reconstruction is explained by 100% signal saturation resulting from cross-sectional curve-fitting error propagation.
+{pnl_finding_str}
 
 ---
 

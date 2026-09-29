@@ -18,12 +18,19 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import datetime
 from src.strategy.backtest import SyntheticDV01Backtest, CostModelV1Config, TradeLedger
 from src.strategy.portfolio import allocate_2s10s_spread, compute_continuous_positions
 from src.strategy.signals import map_curve_forecast_to_spread_signal
 from src.curve.nelson_siegel import StaticNelsonSiegel, nelson_siegel_loadings
 from src.futures.intraday_response import IntradayEventWindowExtractor, CURATED_HIGH_PROFILE_EVENTS
-from src.backtest.walk_forward import WalkForwardHarness, WalkForwardConfig
+from src.backtest.walk_forward import (
+    WalkForwardHarness,
+    WalkForwardConfig,
+    parse_macro_timestamp_availability,
+    MacroTimestampAudit,
+)
+from ml_baseline import write_verdict_report
 
 
 def _make_daily_dates(start: str = "2024-01-02", n_days: int = 60) -> pd.DatetimeIndex:
@@ -653,3 +660,394 @@ def test_zero_surprise_and_inadequate_history_handling():
     assert res["run_metadata"]["macro_event_audit"]["strategy_overlay_status"] == (
         "INACTIVE_ZERO_SURPRISE_OR_INADEQUATE_HISTORY"
     )
+
+
+def test_timezone_dst_and_precedence_parsing():
+    """
+    Test explicit timezone-aware timestamp comparison, DST handling, field precedence,
+    and exact 16:00:00 America/New_York boundary handling.
+    """
+    # 1. Summer (July 2026, EDT = UTC-4): 16:00 ET is 20:00 UTC
+    dt_summer = pd.Timestamp("2026-07-15")
+    
+    # 19:30 UTC = 15:30 EDT -> Available
+    row_summer_pre = {"timestamp": "2026-07-15T19:30:00Z", "date": dt_summer}
+    audit = parse_macro_timestamp_availability(row_summer_pre, dt_summer)
+    assert audit.is_available is True
+    assert audit.is_verified_available is True
+    assert audit.status == MacroTimestampAudit.VERIFIED_AVAILABLE
+
+    # 20:00:00 UTC = 16:00:00 EDT -> Exact boundary is Available
+    row_summer_exact = {"timestamp": "2026-07-15T20:00:00Z", "date": dt_summer}
+    audit = parse_macro_timestamp_availability(row_summer_exact, dt_summer)
+    assert audit.is_available is True
+    assert audit.status == MacroTimestampAudit.VERIFIED_AVAILABLE
+
+    # 20:00:01 UTC = 16:00:01 EDT -> Post-close
+    row_summer_boundary_post = {"timestamp": "2026-07-15T20:00:01Z", "date": dt_summer}
+    audit = parse_macro_timestamp_availability(row_summer_boundary_post, dt_summer)
+    assert audit.is_available is False
+    assert audit.is_post_close is True
+    assert audit.status == MacroTimestampAudit.POST_CLOSE
+
+    # 20:30 UTC = 16:30 EDT -> Post-close
+    row_summer_post = {"timestamp": "2026-07-15T20:30:00Z", "date": dt_summer}
+    audit = parse_macro_timestamp_availability(row_summer_post, dt_summer)
+    assert audit.is_available is False
+    assert audit.status == MacroTimestampAudit.POST_CLOSE
+
+    # 2. Winter (January 2026, EST = UTC-5): 16:00 ET is 21:00 UTC
+    dt_winter = pd.Timestamp("2026-01-15")
+
+    # 20:30 UTC = 15:30 EST -> Available in winter, but was post-close in summer!
+    row_winter_pre = {"timestamp": "2026-01-15T20:30:00Z", "date": dt_winter}
+    audit = parse_macro_timestamp_availability(row_winter_pre, dt_winter)
+    assert audit.is_available is True
+    assert audit.status == MacroTimestampAudit.VERIFIED_AVAILABLE
+
+    # 21:00:00 UTC = 16:00:00 EST -> Exact boundary is Available
+    row_winter_exact = {"timestamp": "2026-01-15T21:00:00Z", "date": dt_winter}
+    audit = parse_macro_timestamp_availability(row_winter_exact, dt_winter)
+    assert audit.is_available is True
+    assert audit.status == MacroTimestampAudit.VERIFIED_AVAILABLE
+
+    # 21:00:01 UTC = 16:00:01 EST -> Post-close
+    row_winter_boundary_post = {"timestamp": "2026-01-15T21:00:01Z", "date": dt_winter}
+    audit = parse_macro_timestamp_availability(row_winter_boundary_post, dt_winter)
+    assert audit.is_available is False
+    assert audit.status == MacroTimestampAudit.POST_CLOSE
+
+    # 21:30 UTC = 16:30 EST -> Post-close
+    row_winter_post = {"timestamp": "2026-01-15T21:30:00Z", "date": dt_winter}
+    audit = parse_macro_timestamp_availability(row_winter_post, dt_winter)
+    assert audit.is_available is False
+    assert audit.status == MacroTimestampAudit.POST_CLOSE
+
+    # 3. Documented precedence order: timestamp > release_timestamp > event_timestamp > publication_timestamp > datetime
+    row_precedence = {
+        "release_timestamp": "2026-07-15T21:00:00Z",  # post-close
+        "timestamp": "2026-07-15T12:30:00Z",          # available (precedes release_timestamp)
+        "date": dt_summer,
+    }
+    audit = parse_macro_timestamp_availability(row_precedence, dt_summer)
+    assert audit.is_available is True
+    assert audit.status == MacroTimestampAudit.VERIFIED_AVAILABLE
+
+    # 4. Naive datetime localizes to America/New_York
+    naive_dt = datetime.datetime(2026, 7, 15, 8, 30, 0)
+    row_naive = {"timestamp": naive_dt, "date": dt_summer}
+    audit = parse_macro_timestamp_availability(row_naive, dt_summer)
+    assert audit.is_available is True
+    assert audit.status == MacroTimestampAudit.VERIFIED_AVAILABLE
+
+    # 5. Legacy date-only assumption (midnight or missing timestamp)
+    row_legacy_midnight = {"timestamp": pd.Timestamp("2026-07-15 00:00:00"), "date": dt_summer}
+    audit = parse_macro_timestamp_availability(row_legacy_midnight, dt_summer)
+    assert audit.is_available is True
+    assert audit.is_legacy_date_only is True
+    assert audit.status == MacroTimestampAudit.LEGACY_DATE_ONLY_ASSUMED
+
+    row_legacy_missing = {"date": dt_summer}
+    audit = parse_macro_timestamp_availability(row_legacy_missing, dt_summer)
+    assert audit.is_available is True
+    assert audit.is_legacy_date_only is True
+    assert audit.status == MacroTimestampAudit.LEGACY_DATE_ONLY_ASSUMED
+
+    # 6. Invalid / contradictory timestamp rejection
+    row_invalid_str = {"timestamp": "not-a-valid-date", "date": dt_summer}
+    audit = parse_macro_timestamp_availability(row_invalid_str, dt_summer)
+    assert audit.is_available is False
+    assert audit.status == MacroTimestampAudit.INVALID_TIMESTAMP_REJECTED
+
+    row_contradictory = {"timestamp": "2026-07-25T12:00:00Z", "date": dt_summer}
+    audit = parse_macro_timestamp_availability(row_contradictory, dt_summer)
+    assert audit.is_available is False
+    assert audit.status == MacroTimestampAudit.INVALID_TIMESTAMP_REJECTED
+
+
+def test_post_close_roll_rule_in_walk_forward_harness():
+    """
+    Test the explicit roll rule: after-close releases on an origin do not affect today's position,
+    but roll into the next eligible decision origin if available.
+    """
+    dates = _make_daily_dates("2024-01-02", 30)
+    tenors = ["DGS3MO", "DGS1", "DGS2", "DGS5", "DGS10", "DGS30"]
+    yield_data = {t: [4.0 + 0.1 * i] * len(dates) for i, t in enumerate(tenors)}
+    yield_df = pd.DataFrame(yield_data, index=dates)
+
+    factor_df = pd.DataFrame({
+        "level": 4.5 + np.sin(np.arange(len(dates)) / 5.0) * 0.1,
+        "slope": -0.5 + np.cos(np.arange(len(dates)) / 5.0) * 0.1,
+        "curvature": 0.2 + np.sin(np.arange(len(dates)) / 3.0) * 0.05,
+    }, index=dates)
+
+    # 10 training events for CPI to establish valid causal beta
+    macro_rows = []
+    for i in range(10):
+        dt = dates[2 * i]
+        surp = 1.0 if i % 2 == 0 else -1.0
+        macro_rows.append({"date": dt, "indicator": "CPI", "surprise_ann": surp})
+        if 2 * i + 1 < len(dates):
+            yield_df.loc[dates[2 * i + 1], "DGS10"] += surp * 0.10
+
+    cfg = WalkForwardConfig(train_window_days=20, refit_frequency_days=5)
+
+    # Base: no announcement in test fold
+    harness_base = WalkForwardHarness(yield_df, factor_df, pd.DataFrame(macro_rows), cfg)
+    res_base = harness_base.run_walk_forward_evaluation(max_folds=1)
+    pos_base = res_base["backtest_results"]["DNS_Kalman_Macro"].positions
+    sig_base = res_base["signals"]["DNS_Kalman_Macro"][0]
+
+    t_origin_0 = dates[19]  # train_dates[-1] (first decision origin)
+    t_origin_1 = dates[20]  # test_dates[0] (second decision origin)
+
+    # Injected post-close release on t_origin_0 at 17:00 ET (22:00 UTC)
+    ts_post_close = pd.Timestamp(f"{t_origin_0.date()} 22:00:00", tz="UTC")
+    macro_rows_injected = macro_rows + [{
+        "date": t_origin_0,
+        "timestamp": ts_post_close,
+        "indicator": "CPI",
+        "surprise_ann": 2.0,
+    }]
+    harness_inj = WalkForwardHarness(yield_df, factor_df, pd.DataFrame(macro_rows_injected), cfg)
+    res_inj = harness_inj.run_walk_forward_evaluation(max_folds=1)
+    pos_inj = res_inj["backtest_results"]["DNS_Kalman_Macro"].positions
+    sig_inj = res_inj["signals"]["DNS_Kalman_Macro"][0]
+
+    # CAUSALITY LOCKDOWN: Post-close release on t_origin_0 CANNOT affect t_origin_0 decision!
+    assert sig_base.loc[t_origin_0] == sig_inj.loc[t_origin_0]
+    pd.testing.assert_series_equal(pos_base.loc[t_origin_0], pos_inj.loc[t_origin_0])
+
+    # ROLL RULE: Post-close release DOES roll into t_origin_1 subsequent decision!
+    assert not np.isclose(sig_base.loc[t_origin_1], sig_inj.loc[t_origin_1])
+    assert not (pos_base.loc[t_origin_1] == pos_inj.loc[t_origin_1]).all()
+
+    audit = res_inj["run_metadata"]["macro_event_audit"]
+    assert audit["total_post_close_events"] >= 1
+    assert audit["total_rolled_to_next_decision_events"] >= 1
+
+
+def test_supported_indicator_zero_history_counterexample_and_audit_reconciliation():
+    """
+    Test that a supported indicator with 0 training history (e.g. NFP) is classified as
+    inadequate_history_events, and verify that the full audit reconciliation identities hold.
+    """
+    dates = _make_daily_dates("2024-01-02", 30)
+    tenors = ["DGS3MO", "DGS1", "DGS2", "DGS5", "DGS10", "DGS30"]
+    yield_data = {t: [4.0 + 0.1 * i] * len(dates) for i, t in enumerate(tenors)}
+    yield_df = pd.DataFrame(yield_data, index=dates)
+
+    factor_df = pd.DataFrame({
+        "level": 4.5 + np.sin(np.arange(len(dates)) / 5.0) * 0.1,
+        "slope": -0.5 + np.cos(np.arange(len(dates)) / 5.0) * 0.1,
+        "curvature": 0.2 + np.sin(np.arange(len(dates)) / 3.0) * 0.05,
+    }, index=dates)
+
+    # 10 training events for CPI (so CPI is eligible with N >= 8)
+    # 0 training events for NFP (supported indicator with ZERO history)
+    macro_rows = []
+    for i in range(10):
+        dt = dates[2 * i]
+        macro_rows.append({"date": dt, "indicator": "CPI", "surprise_ann": 1.0 if i % 2 == 0 else -1.0})
+        yield_df.loc[dates[2 * i + 1], "DGS10"] += 0.05
+
+    t_origin = dates[20]
+    # Test window events on t_origin (January, EST = UTC-5):
+    # 1. CPI release at 8:30 AM (available, eligible coefficient)
+    macro_rows.append({
+        "date": t_origin,
+        "timestamp": f"{t_origin.date()}T08:30:00-05:00",
+        "indicator": "CPI",
+        "surprise_ann": 1.2,
+    })
+    # 2. NFP release at 8:30 AM (available, but NFP has 0 training events -> inadequate history counterexample!)
+    macro_rows.append({
+        "date": t_origin,
+        "timestamp": f"{t_origin.date()}T08:30:00-05:00",
+        "indicator": "NFP",
+        "surprise_ann": 1.5,
+    })
+    # 3. Post-close release at 17:00 ET (22:00 UTC)
+    macro_rows.append({
+        "date": t_origin,
+        "timestamp": f"{t_origin.date()}T17:00:00-05:00",
+        "indicator": "CPI",
+        "surprise_ann": 0.8,
+    })
+    # 4. Missing surprise release
+    macro_rows.append({
+        "date": t_origin,
+        "timestamp": f"{t_origin.date()}T10:00:00-05:00",
+        "indicator": "CPI",
+        "surprise_ann": np.nan,
+    })
+
+    cfg = WalkForwardConfig(train_window_days=20, refit_frequency_days=5)
+    harness = WalkForwardHarness(yield_df, factor_df, pd.DataFrame(macro_rows), cfg)
+    res = harness.run_walk_forward_evaluation(max_folds=1)
+    audit = res["run_metadata"]["macro_event_audit"]["fold_breakdown"][0]
+
+    # Check NFP classification
+    assert audit["eligible_coefficient_events"] == 1, "Only CPI has >=8 training observations"
+    assert audit["inadequate_history_events"] == 1, "NFP has 0 training observations and must be inadequate history"
+    assert audit["post_close_events"] == 1
+    assert audit["missing_surprise_events"] == 1
+    assert audit["timestamp_available_events"] == 3
+    assert audit["observed_decision_events"] == 4
+
+    # Mathematical audit reconciliation identities
+    # 1. observed_decision_events = timestamp_available_events + post_close_events
+    assert audit["observed_decision_events"] == audit["timestamp_available_events"] + audit["post_close_events"]
+
+    # 2. timestamp_available_events = usable_surprise_events + missing_surprise_events
+    assert audit["timestamp_available_events"] == audit["usable_surprise_events"] + audit["missing_surprise_events"]
+
+    # 3. usable_surprise_events = eligible_coefficient_events + inadequate_history_events
+    assert audit["usable_surprise_events"] == audit["eligible_coefficient_events"] + audit["inadequate_history_events"]
+
+    # 4. eligible_coefficient_events = active_overlay_events + zero_impact_events
+    assert audit["eligible_coefficient_events"] == audit["active_overlay_events"] + audit["zero_impact_events"]
+
+
+def test_signal_mapping_scale_floor_and_details_fixture():
+    """
+    Test map_curve_forecast_to_spread_signal return_details=True across 2s10s and 2s5s10s fly.
+    Verify that std=1e-6 floors scale to 1e-4, preventing artificial signal saturation.
+    Verify saturation bounds disclosure.
+    """
+    maturities = np.array([0.25, 1.0, 2.0, 5.0, 10.0, 30.0])
+    tenor_cols = ["DGS3MO", "DGS1", "DGS2", "DGS5", "DGS10", "DGS30"]
+    y_origin = np.array([4.5, 4.6, 4.4, 4.0, 3.8, 4.1])
+    # 2s10s spread at origin = 3.8 - 4.4 = -0.60
+    # Create forecast curve with spread change of +2e-5 (+0.2 bp)
+    y_pred = y_origin.copy()
+    y_pred[4] += 2e-5  # DGS10 increases by 2e-5
+
+    # Test with near-zero training std = 1e-6
+    train_spread_std = 1e-6
+    sig, details = map_curve_forecast_to_spread_signal(
+        y_pred, y_origin, tenor_cols, train_spread_std, strategy_type="2s10s", return_details=True
+    )
+
+    # Scale must be floored to 1e-4
+    assert details["scale"] == 1e-4
+    # Raw input is 2e-5 / 1e-4 = 0.20
+    assert np.isclose(details["raw_input"], 0.20)
+    assert np.isclose(sig, 0.20)
+    # Because 0.20 < 1.0, it must NOT be clipped or saturated
+    assert details["is_clipped"] is False or details["is_clipped"] == 0
+    assert details["is_saturated"] is False or details["is_saturated"] == 0
+
+    # Without flooring, raw input would have been 2e-5 / 1e-6 = 20.0 (erroneously clipped)
+    unfloored_raw = 2e-5 / 1e-6
+    assert np.isclose(unfloored_raw, 20.0)
+
+    # Test fly strategy with return_details=True
+    sig_fly, details_fly = map_curve_forecast_to_spread_signal(
+        y_pred, y_origin, tenor_cols, 0.05, strategy_type="2s5s10s", return_details=True
+    )
+    assert details_fly["observable_name"] == "2s5s10s"
+    assert "raw_input" in details_fly
+    assert "is_clipped" in details_fly
+    assert "is_saturated" in details_fly
+
+
+def test_sample_independent_dynamic_verdict_report(tmp_path, monkeypatch):
+    """
+    Test that write_verdict_report produces sample-independent dynamic output,
+    renders N/A for missing values, and avoids hardcoded 57-day sample constants.
+    """
+    # Create synthetic common_sample_table deliberately unlike the 57-day sample
+    models = [
+        "Random Walk (Curve Benchmark)",
+        "AR(1) Baseline (Static NS)",
+        "DNS + Kalman",
+        "Static NS (Residual-Preserving Diagnostic)",
+        "DNS + Kalman (Residual-Preserving Diagnostic)",
+        "DNS (60% Exposure Control)",
+        "DNS + Kalman + Macro",
+        "GBM",
+    ]
+    data = {
+        "2s10s Spread RMSE (bp)": [1.50, 15.20, 14.80, 1.65, 1.60, 14.80, 14.80, np.nan],
+        "Trading Net PnL ($)": [0.0, 12500.0, 12500.0, 14200.0, 14200.0, 7500.0, 7500.0, np.nan],
+        "Annualized Sharpe": [np.nan, 0.85, 0.85, 1.20, 1.22, 0.85, 0.85, np.nan],
+        "Hit Rate (%)": [np.nan, 58.5, 58.5, 62.0, 62.0, 58.5, 58.5, np.nan],
+    }
+    table = pd.DataFrame(data, index=models)
+
+    ml_eval = {
+        "shap_data": {"type": "tree_shap", "results": {}}
+    }
+    run_meta = {
+        "git_commit": "testcommit1234",
+        "run_mode": "SYNTHETIC_TEN_FOLD_EVALUATION",
+        "fold_count": 10,
+        "eval_start_date": "2023-01-03",
+        "eval_end_date": "2023-08-30",
+        "total_eval_days": 165,
+        "gbm_backend": "sklearn",
+        "seed": 42,
+        "data_checksums": {"yield_panel": "abcd", "factor_panel": "ef01", "macro_surprises": "2345"},
+        "macro_event_audit": {
+            "total_training_events": 85,
+            "total_calendar_events": 12,
+            "total_observed_decision_events": 12,
+            "total_timestamp_available_events": 10,
+            "total_timestamp_verified_available_events": 8,
+            "total_legacy_date_only_assumed_events": 2,
+            "total_post_close_events": 2,
+            "total_rolled_to_next_decision_events": 2,
+            "total_usable_surprise_events": 10,
+            "total_eligible_coefficient_events": 8,
+            "total_inadequate_history_events": 2,
+            "total_active_overlay_events": 6,
+            "nonzero_macro_days": 6,
+            "curve_forecast_provenance": "COPIED_DNS_CURVE_FORECAST",
+            "strategy_overlay_status": "ACTIVE_OVERLAY",
+            "evaluation_status": "VALID_MACRO_TEST",
+        },
+        "econometric_diagnostics": {
+            "ns_contemporaneous_fit_rmse_bp": 3.45,
+            "factor_coordinate_rmse_ar1_bp": 2.10,
+            "factor_coordinate_rmse_random_walk_bp": 2.25,
+            "observable_2s10s_spread_decomposition": {
+                "total_spread_rmse_bp": 15.20,
+                "factor_dynamics_spread_rmse_bp": 1.55,
+                "cross_sectional_fit_spread_rmse_bp": 15.10,
+                "uncentered_cross_moment_bp2": -0.85,
+                "sum_components_mse_bp2": 231.04,
+                "total_spread_mse_bp2": 231.04,
+            },
+            "raw_signal_threshold_exceedance_pct": {"Static_NS": 45.0, "Static_NS_Residual_Preserving": 0.0},
+            "inherited_dns_clipping_pct": {"Static_NS": 0.0, "DNS_Scaled_60": 0.0},
+            "additional_clipping_frequency_pct": {"Static_NS": 45.0, "Static_NS_Residual_Preserving": 5.0},
+            "final_position_saturation_pct": {"Static_NS": 45.0, "Static_NS_Residual_Preserving": 5.0},
+            "saturation_bounds": {"DNS_Scaled_60": 0.60, "Static_NS": 1.00},
+            "mean_unclipped_signal_std": {"Static_NS": 0.95, "Static_NS_Residual_Preserving": 0.42},
+        },
+    }
+
+    # Redirect reports directory to tmp_path
+    monkeypatch.chdir(tmp_path)
+    write_verdict_report(table, ml_eval, run_meta)
+
+    verdict_file = tmp_path / "reports" / "ml_baseline_verdict.md"
+    assert verdict_file.exists()
+    content = verdict_file.read_text(encoding="utf-8")
+
+    # Assert dynamic contents
+    assert "165 trading days" in content
+    assert "Folds: 10" in content
+    assert "15.20 bp" in content
+    assert "1.65 bp" in content
+    assert "45.0%" in content
+    assert "5.0%" in content
+    assert "VALID_MACRO_TEST" in content
+    assert "±0.60" in content
+
+    # Assert no stale hardcoded constants from 57-day run
+    assert "57 trading days" not in content
+    assert "-$46,684.38" not in content
+    assert "28.82" not in content
+    assert "29.90" not in content

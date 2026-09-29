@@ -20,11 +20,12 @@ Implements:
 """
 
 from dataclasses import dataclass, field
+import datetime
 import hashlib
 import logging
 from pathlib import Path
 import subprocess
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
@@ -78,36 +79,199 @@ def get_git_provenance() -> Dict[str, Any]:
         }
 
 
+@dataclass
+class MacroTimestampAudit:
+    VERIFIED_AVAILABLE: ClassVar[str] = "VERIFIED_AVAILABLE"
+    AVAILABLE: ClassVar[str] = "VERIFIED_AVAILABLE"
+    POST_CLOSE: ClassVar[str] = "POST_CLOSE"
+    LEGACY_DATE_ONLY_ASSUMED: ClassVar[str] = "LEGACY_DATE_ONLY_ASSUMED"
+    INVALID_TIMESTAMP_REJECTED: ClassVar[str] = "INVALID_TIMESTAMP_REJECTED"
+
+    is_available: bool
+    status: str  # "VERIFIED_AVAILABLE", "POST_CLOSE", "LEGACY_DATE_ONLY_ASSUMED", "INVALID_TIMESTAMP_REJECTED"
+    release_dt_nyc: Optional[pd.Timestamp]
+    decision_cutoff_nyc: pd.Timestamp
+    is_legacy_date_only: bool
+    is_post_close: bool
+    is_verified_available: bool
+    reason: str = ""
+
+
+def parse_macro_timestamp_availability(
+    row: Any,
+    dt: pd.Timestamp,
+) -> MacroTimestampAudit:
+    """
+    Explicit timezone-aware macro release timestamp validation and availability audit.
+    
+    RESEARCH INTEGRITY & TIMING CONTRACT:
+    - Decision cutoff is constructed in 'America/New_York' at exactly 16:00:00 on date dt.
+    - Summer (EDT, UTC-4): 16:00 ET = 20:00 UTC.
+    - Winter (EST, UTC-5): 16:00 ET = 21:00 UTC.
+    - Release timestamp is normalized to 'America/New_York' before comparison.
+    - Supported candidate fields: 'timestamp', 'release_timestamp', 'event_timestamp',
+      'publication_timestamp', 'datetime'.
+    - Supported inputs: timezone-aware Timestamps, ISO-8601 strings, datetime objects.
+    - Explicit audit distinction:
+      * VERIFIED_AVAILABLE: Valid timestamp <= 16:00:00 America/New_York on date dt.
+      * POST_CLOSE: Valid timestamp > 16:00:00 America/New_York on date dt.
+      * LEGACY_DATE_ONLY_ASSUMED: Missing timestamp or 00:00:00 time. Assumed pre-close
+        daytime release (e.g. 8:30 AM ET) under legacy convention, but audited separately.
+      * INVALID_TIMESTAMP_REJECTED: Corrupted/unparseable string or contradictory date.
+    - Latency convention: Exact boundary release <= 16:00:00 ET is available for date dt.
+      Releases > 16:00:00 ET enter post-close status and roll to the next eligible decision.
+    """
+    dt_date = pd.to_datetime(dt).date()
+    decision_cutoff_nyc = pd.Timestamp(f"{dt_date} 16:00:00", tz="America/New_York")
+    
+    # 1. Candidate field extraction with documented precedence
+    raw_ts = None
+    candidate_fields = ("timestamp", "release_timestamp", "event_timestamp", "publication_timestamp", "datetime")
+    for f in candidate_fields:
+        if isinstance(row, dict) and f in row:
+            v = row[f]
+            if v is not None and not pd.isna(v):
+                raw_ts = v
+                break
+        elif hasattr(row, "__getitem__"):
+            try:
+                if f in row:
+                    v = row[f]
+                    if v is not None and not pd.isna(v):
+                        raw_ts = v
+                        break
+            except Exception:
+                pass
+
+    if raw_ts is None:
+        return MacroTimestampAudit(
+            is_available=True,
+            status="LEGACY_DATE_ONLY_ASSUMED",
+            release_dt_nyc=None,
+            decision_cutoff_nyc=decision_cutoff_nyc,
+            is_legacy_date_only=True,
+            is_post_close=False,
+            is_verified_available=False,
+        )
+
+    # 2. Parse raw_ts to pd.Timestamp
+    ts = None
+    if isinstance(raw_ts, (pd.Timestamp, datetime.datetime)):
+        ts = pd.Timestamp(raw_ts)
+    elif isinstance(raw_ts, str):
+        try:
+            ts = pd.to_datetime(raw_ts)
+        except Exception:
+            return MacroTimestampAudit(
+                is_available=False,
+                status="INVALID_TIMESTAMP_REJECTED",
+                release_dt_nyc=None,
+                decision_cutoff_nyc=decision_cutoff_nyc,
+                is_legacy_date_only=False,
+                is_post_close=False,
+                is_verified_available=False,
+            )
+    else:
+        try:
+            ts = pd.to_datetime(raw_ts)
+        except Exception:
+            return MacroTimestampAudit(
+                is_available=False,
+                status="INVALID_TIMESTAMP_REJECTED",
+                release_dt_nyc=None,
+                decision_cutoff_nyc=decision_cutoff_nyc,
+                is_legacy_date_only=False,
+                is_post_close=False,
+                is_verified_available=False,
+            )
+
+    if ts is pd.NaT or pd.isna(ts):
+        return MacroTimestampAudit(
+            is_available=False,
+            status="INVALID_TIMESTAMP_REJECTED",
+            release_dt_nyc=None,
+            decision_cutoff_nyc=decision_cutoff_nyc,
+            is_legacy_date_only=False,
+            is_post_close=False,
+            is_verified_available=False,
+        )
+
+    # 3. Check timezone and date-only (00:00:00) condition
+    if ts.tz is None:
+        if ts.time() == datetime.time(0, 0, 0):
+            return MacroTimestampAudit(
+                is_available=True,
+                status="LEGACY_DATE_ONLY_ASSUMED",
+                release_dt_nyc=None,
+                decision_cutoff_nyc=decision_cutoff_nyc,
+                is_legacy_date_only=True,
+                is_post_close=False,
+                is_verified_available=False,
+            )
+        ts_nyc = ts.tz_localize("America/New_York")
+    else:
+        ts_nyc = ts.tz_convert("America/New_York")
+
+    # 4. Check contradictory dates (timestamp date differs by >1 day from event date)
+    row_date = None
+    for d_col in ("date", "release_date"):
+        if isinstance(row, dict) and d_col in row and not pd.isna(row[d_col]):
+            try:
+                row_date = pd.to_datetime(row[d_col]).date()
+                break
+            except Exception:
+                pass
+        elif hasattr(row, "__getitem__"):
+            try:
+                if d_col in row and not pd.isna(row[d_col]):
+                    row_date = pd.to_datetime(row[d_col]).date()
+                    break
+            except Exception:
+                pass
+
+    if row_date is not None:
+        if abs((ts_nyc.date() - row_date).days) > 1:
+            return MacroTimestampAudit(
+                is_available=False,
+                status="INVALID_TIMESTAMP_REJECTED",
+                release_dt_nyc=ts_nyc,
+                decision_cutoff_nyc=decision_cutoff_nyc,
+                is_legacy_date_only=False,
+                is_post_close=False,
+                is_verified_available=False,
+            )
+
+    # 5. Evaluate against decision cutoff
+    if ts_nyc <= decision_cutoff_nyc:
+        return MacroTimestampAudit(
+            is_available=True,
+            status="VERIFIED_AVAILABLE",
+            release_dt_nyc=ts_nyc,
+            decision_cutoff_nyc=decision_cutoff_nyc,
+            is_legacy_date_only=False,
+            is_post_close=False,
+            is_verified_available=True,
+        )
+    else:
+        return MacroTimestampAudit(
+            is_available=False,
+            status="POST_CLOSE",
+            release_dt_nyc=ts_nyc,
+            decision_cutoff_nyc=decision_cutoff_nyc,
+            is_legacy_date_only=False,
+            is_post_close=True,
+            is_verified_available=False,
+        )
+
+
 def is_timestamp_available_for_decision(row: Any, dt: pd.Timestamp) -> bool:
     """
     Check if macro release was available prior to the decision at market close on date dt.
-    Market close cutoff: 16:00 ET / 21:00 UTC (daylight saving) or 22:00 UTC (standard).
-    If timestamp is missing, naive date, or has 00:00 time, defaults to standard
-    pre-close daytime release assumption (e.g. 8:30 AM / 10:00 AM ET).
+    Returns True for verified pre-close releases and legacy date-only assumptions.
+    Returns False for post-close and invalid/contradictory releases.
     """
-    if "timestamp" not in row or pd.isna(row["timestamp"]):
-        return True
-    ts = row["timestamp"]
-    if isinstance(ts, pd.Timestamp):
-        if ts.time() == pd.Timestamp("00:00:00").time():
-            return True
-        if ts.tz is not None:
-            # UTC timestamp: after 21:00 UTC (16:00 ET / 17:00 ET) is post-close
-            if ts.date() == dt.date():
-                return ts.hour < 21 or (ts.hour == 21 and ts.minute == 0 and ts.second == 0)
-            elif ts.date() < dt.date():
-                return True
-            else:
-                return False
-        else:
-            # Naive local timestamp
-            if ts.date() == dt.date():
-                return ts.hour < 16 or (ts.hour == 16 and ts.minute == 0 and ts.second == 0)
-            elif ts.date() < dt.date():
-                return True
-            else:
-                return False
-    return True
+    audit = parse_macro_timestamp_availability(row, dt)
+    return audit.is_available
 
 
 def get_file_checksum(filepath: Union[str, Path]) -> str:
@@ -416,19 +580,18 @@ class WalkForwardHarness:
                 fly_2s5s10s_sq_errors["PCA_VAR"].extend(((spreads_act["2s5s10s"] - spreads_pca["2s5s10s"]) ** 2).flatten())
                 
             # Signal: mapped from 1-step predicted yield curve into predicted observable spread change
-            sig_pca_arr = map_curve_forecast_to_spread_signal(
-                y_pred_pca, y_origin_all, tenor_cols, train_spread_std, strategy_type
+            sig_pca_arr, diag_pca = map_curve_forecast_to_spread_signal(
+                y_pred_pca, y_origin_all, tenor_cols, train_spread_std, strategy_type, return_details=True
             )
             sig_pca = pd.Series(sig_pca_arr, index=orig_dates)
             oos_signals["PCA_VAR"].append(sig_pca)
-            sp_curr = compute_observable_spreads(y_origin_all, tenor_cols)["2s10s"]
-            raw_pca = (spreads_pca["2s10s"] - sp_curr) / train_spread_std
-            raw_signals["PCA_VAR"].extend(raw_pca.tolist())
-            stage_inputs["PCA_VAR"].extend(raw_pca.tolist())
+            raw_pca = diag_pca["raw_input"]
+            raw_signals["PCA_VAR"].extend(raw_pca.tolist() if isinstance(raw_pca, np.ndarray) else [raw_pca])
+            stage_inputs["PCA_VAR"].extend(raw_pca.tolist() if isinstance(raw_pca, np.ndarray) else [raw_pca])
             stage_outputs["PCA_VAR"].extend(sig_pca_arr.tolist())
             inherited_dns_clipping["PCA_VAR"].extend([False] * len(orig_dates))
-            additional_clipping["PCA_VAR"].extend((np.abs(raw_pca) > 1.0).tolist())
-            saturation_flags["PCA_VAR"].extend((np.abs(sig_pca_arr) >= 1.0 - 1e-6).tolist())
+            additional_clipping["PCA_VAR"].extend(diag_pca["is_clipped"].tolist() if isinstance(diag_pca["is_clipped"], np.ndarray) else [diag_pca["is_clipped"]])
+            saturation_flags["PCA_VAR"].extend(diag_pca["is_saturated"].tolist() if isinstance(diag_pca["is_saturated"], np.ndarray) else [diag_pca["is_saturated"]])
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
                 for c_idx, c in enumerate(tenor_cols):
@@ -462,18 +625,18 @@ class WalkForwardHarness:
                 fly_2s5s10s_sq_errors["Static_NS"].extend(((spreads_act["2s5s10s"] - spreads_ns["2s5s10s"]) ** 2).flatten())
                 
             # Signal: mapped from 1-step predicted yield curve into predicted observable spread change
-            sig_ns_arr = map_curve_forecast_to_spread_signal(
-                y_pred_ns, y_origin_all, tenor_cols, train_spread_std, strategy_type
+            sig_ns_arr, diag_ns = map_curve_forecast_to_spread_signal(
+                y_pred_ns, y_origin_all, tenor_cols, train_spread_std, strategy_type, return_details=True
             )
             sig_ns = pd.Series(sig_ns_arr, index=orig_dates)
             oos_signals["Static_NS"].append(sig_ns)
-            raw_ns = (spreads_ns["2s10s"] - sp_curr) / train_spread_std
-            raw_signals["Static_NS"].extend(raw_ns.tolist())
-            stage_inputs["Static_NS"].extend(raw_ns.tolist())
+            raw_ns = diag_ns["raw_input"]
+            raw_signals["Static_NS"].extend(raw_ns.tolist() if isinstance(raw_ns, np.ndarray) else [raw_ns])
+            stage_inputs["Static_NS"].extend(raw_ns.tolist() if isinstance(raw_ns, np.ndarray) else [raw_ns])
             stage_outputs["Static_NS"].extend(sig_ns_arr.tolist())
             inherited_dns_clipping["Static_NS"].extend([False] * len(orig_dates))
-            additional_clipping["Static_NS"].extend((np.abs(raw_ns) > 1.0).tolist())
-            saturation_flags["Static_NS"].extend((np.abs(sig_ns_arr) >= 1.0 - 1e-6).tolist())
+            additional_clipping["Static_NS"].extend(diag_ns["is_clipped"].tolist() if isinstance(diag_ns["is_clipped"], np.ndarray) else [diag_ns["is_clipped"]])
+            saturation_flags["Static_NS"].extend(diag_ns["is_saturated"].tolist() if isinstance(diag_ns["is_saturated"], np.ndarray) else [diag_ns["is_saturated"]])
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
                 for c_idx, c in enumerate(tenor_cols):
@@ -534,16 +697,16 @@ class WalkForwardHarness:
                 fly_2s5s10s_sq_errors["Static_NS_Residual_Preserving"].extend(
                     ((spreads_act["2s5s10s"] - spreads_ns_res["2s5s10s"]) ** 2).flatten()
                 )
-            sig_ns_res_arr = map_curve_forecast_to_spread_signal(
-                y_pred_ns_res, y_origin_all, tenor_cols, train_spread_std, strategy_type
+            sig_ns_res_arr, diag_ns_res = map_curve_forecast_to_spread_signal(
+                y_pred_ns_res, y_origin_all, tenor_cols, train_spread_std, strategy_type, return_details=True
             )
-            raw_ns_res = (spreads_ns_res["2s10s"] - sp_curr) / train_spread_std
-            raw_signals["Static_NS_Residual_Preserving"].extend(raw_ns_res.tolist())
-            stage_inputs["Static_NS_Residual_Preserving"].extend(raw_ns_res.tolist())
+            raw_ns_res = diag_ns_res["raw_input"]
+            raw_signals["Static_NS_Residual_Preserving"].extend(raw_ns_res.tolist() if isinstance(raw_ns_res, np.ndarray) else [raw_ns_res])
+            stage_inputs["Static_NS_Residual_Preserving"].extend(raw_ns_res.tolist() if isinstance(raw_ns_res, np.ndarray) else [raw_ns_res])
             stage_outputs["Static_NS_Residual_Preserving"].extend(sig_ns_res_arr.tolist())
             inherited_dns_clipping["Static_NS_Residual_Preserving"].extend([False] * len(orig_dates))
-            additional_clipping["Static_NS_Residual_Preserving"].extend((np.abs(raw_ns_res) > 1.0).tolist())
-            saturation_flags["Static_NS_Residual_Preserving"].extend((np.abs(sig_ns_res_arr) >= 1.0 - 1e-6).tolist())
+            additional_clipping["Static_NS_Residual_Preserving"].extend(diag_ns_res["is_clipped"].tolist() if isinstance(diag_ns_res["is_clipped"], np.ndarray) else [diag_ns_res["is_clipped"]])
+            saturation_flags["Static_NS_Residual_Preserving"].extend(diag_ns_res["is_saturated"].tolist() if isinstance(diag_ns_res["is_saturated"], np.ndarray) else [diag_ns_res["is_saturated"]])
             sig_ns_res = pd.Series(sig_ns_res_arr, index=orig_dates)
             oos_signals["Static_NS_Residual_Preserving"].append(sig_ns_res)
             
@@ -587,18 +750,18 @@ class WalkForwardHarness:
                 fly_2s5s10s_sq_errors["DNS_Kalman"].extend(((spreads_act["2s5s10s"] - spreads_kf["2s5s10s"]) ** 2).flatten())
                 
             # Signal: mapped from 1-step predicted yield curve into predicted observable spread change
-            sig_kf_arr = map_curve_forecast_to_spread_signal(
-                y_pred_kf, y_origin_all, tenor_cols, train_spread_std, strategy_type
+            sig_kf_arr, diag_kf = map_curve_forecast_to_spread_signal(
+                y_pred_kf, y_origin_all, tenor_cols, train_spread_std, strategy_type, return_details=True
             )
             sig_kf = pd.Series(sig_kf_arr, index=orig_dates)
             oos_signals["DNS_Kalman"].append(sig_kf)
-            raw_kf = (spreads_kf["2s10s"] - sp_curr) / train_spread_std
-            raw_signals["DNS_Kalman"].extend(raw_kf.tolist())
-            stage_inputs["DNS_Kalman"].extend(raw_kf.tolist())
+            raw_kf = diag_kf["raw_input"]
+            raw_signals["DNS_Kalman"].extend(raw_kf.tolist() if isinstance(raw_kf, np.ndarray) else [raw_kf])
+            stage_inputs["DNS_Kalman"].extend(raw_kf.tolist() if isinstance(raw_kf, np.ndarray) else [raw_kf])
             stage_outputs["DNS_Kalman"].extend(sig_kf_arr.tolist())
             inherited_dns_clipping["DNS_Kalman"].extend([False] * len(orig_dates))
-            additional_clipping["DNS_Kalman"].extend((np.abs(raw_kf) > 1.0).tolist())
-            saturation_flags["DNS_Kalman"].extend((np.abs(sig_kf_arr) >= 1.0 - 1e-6).tolist())
+            additional_clipping["DNS_Kalman"].extend(diag_kf["is_clipped"].tolist() if isinstance(diag_kf["is_clipped"], np.ndarray) else [diag_kf["is_clipped"]])
+            saturation_flags["DNS_Kalman"].extend(diag_kf["is_saturated"].tolist() if isinstance(diag_kf["is_saturated"], np.ndarray) else [diag_kf["is_saturated"]])
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
                 for c_idx, c in enumerate(tenor_cols):
@@ -634,16 +797,16 @@ class WalkForwardHarness:
                 fly_2s5s10s_sq_errors["DNS_Kalman_Residual_Preserving"].extend(
                     ((spreads_act["2s5s10s"] - spreads_kf_res["2s5s10s"]) ** 2).flatten()
                 )
-            sig_kf_res_arr = map_curve_forecast_to_spread_signal(
-                y_pred_kf_res, y_origin_all, tenor_cols, train_spread_std, strategy_type
+            sig_kf_res_arr, diag_kf_res = map_curve_forecast_to_spread_signal(
+                y_pred_kf_res, y_origin_all, tenor_cols, train_spread_std, strategy_type, return_details=True
             )
-            raw_kf_res = (spreads_kf_res["2s10s"] - sp_curr) / train_spread_std
-            raw_signals["DNS_Kalman_Residual_Preserving"].extend(raw_kf_res.tolist())
-            stage_inputs["DNS_Kalman_Residual_Preserving"].extend(raw_kf_res.tolist())
+            raw_kf_res = diag_kf_res["raw_input"]
+            raw_signals["DNS_Kalman_Residual_Preserving"].extend(raw_kf_res.tolist() if isinstance(raw_kf_res, np.ndarray) else [raw_kf_res])
+            stage_inputs["DNS_Kalman_Residual_Preserving"].extend(raw_kf_res.tolist() if isinstance(raw_kf_res, np.ndarray) else [raw_kf_res])
             stage_outputs["DNS_Kalman_Residual_Preserving"].extend(sig_kf_res_arr.tolist())
             inherited_dns_clipping["DNS_Kalman_Residual_Preserving"].extend([False] * len(orig_dates))
-            additional_clipping["DNS_Kalman_Residual_Preserving"].extend((np.abs(raw_kf_res) > 1.0).tolist())
-            saturation_flags["DNS_Kalman_Residual_Preserving"].extend((np.abs(sig_kf_res_arr) >= 1.0 - 1e-6).tolist())
+            additional_clipping["DNS_Kalman_Residual_Preserving"].extend(diag_kf_res["is_clipped"].tolist() if isinstance(diag_kf_res["is_clipped"], np.ndarray) else [diag_kf_res["is_clipped"]])
+            saturation_flags["DNS_Kalman_Residual_Preserving"].extend(diag_kf_res["is_saturated"].tolist() if isinstance(diag_kf_res["is_saturated"], np.ndarray) else [diag_kf_res["is_saturated"]])
             sig_kf_res = pd.Series(sig_kf_res_arr, index=orig_dates)
             oos_signals["DNS_Kalman_Residual_Preserving"].append(sig_kf_res)
 
@@ -664,7 +827,7 @@ class WalkForwardHarness:
             raw_signals["DNS_Scaled_60"].extend(control_input.tolist())
             stage_inputs["DNS_Scaled_60"].extend(control_input.tolist())
             stage_outputs["DNS_Scaled_60"].extend(control_input.tolist())
-            inherited_dns_clipping["DNS_Scaled_60"].extend((np.abs(raw_kf) > 1.0).tolist())
+            inherited_dns_clipping["DNS_Scaled_60"].extend(diag_kf["is_clipped"].tolist() if isinstance(diag_kf["is_clipped"], np.ndarray) else [diag_kf["is_clipped"]])
             additional_clipping["DNS_Scaled_60"].extend([False] * len(orig_dates))
             saturation_flags["DNS_Scaled_60"].extend((np.abs(control_input) >= 0.60 - 1e-6).tolist())
             
@@ -686,62 +849,121 @@ class WalkForwardHarness:
             )
             
             # Join macro releases by availability at decision origin (orig_dates)
-            # Releases on orig_dt (e.g. 8:30 AM / 14:00) are available at orig_dt close; target-date releases are future.
+            # Releases on orig_dt <= 16:00 ET are available at orig_dt close.
+            # Releases after 16:00 ET roll into the next eligible decision origin if available.
             if self.macro_df is not None and not self.macro_df.empty and "date" in self.macro_df.columns:
                 macro_sub = self.macro_df[self.macro_df["date"].isin(orig_dates)]
             else:
                 macro_sub = pd.DataFrame()
             macro_impulse = pd.Series(0.0, index=orig_dates)
             
+            orig_dates_list = list(orig_dates)
+            orig_idx_map = {dt: i for i, dt in enumerate(orig_dates_list)}
+            
             eval_dec_count = 0
+            ts_verified_count = 0
+            legacy_date_assumed_count = 0
             ts_avail_count = 0
             post_close_count = 0
+            rolled_count = 0
+            invalid_ts_rejected_count = 0
+            missing_surp_count = 0
             usable_surp_count = 0
             zero_surp_count = 0
             eligible_coeff_count = 0
             inadequate_hist_count = 0
+            active_overlay_count = 0
+            zero_impact_count = 0
             orig_release_dates = set()
 
             for _, m_row in macro_sub.iterrows():
                 dt = m_row["date"]
                 ind = m_row.get("indicator")
                 surp = m_row.get("surprise_ann", np.nan)
+                k_idx = orig_idx_map[dt]
+                
+                avail_audit = parse_macro_timestamp_availability(m_row, dt)
+                
+                if avail_audit.status == MacroTimestampAudit.INVALID_TIMESTAMP_REJECTED:
+                    invalid_ts_rejected_count += 1
+                    logger.warning("Rejecting invalid macro timestamp for indicator %s on %s: %s", ind, dt, avail_audit.reason)
+                    continue
                 
                 eval_dec_count += 1
                 orig_release_dates.add(dt)
                 
-                if not is_timestamp_available_for_decision(m_row, dt):
+                if avail_audit.status == MacroTimestampAudit.POST_CLOSE:
                     post_close_count += 1
+                    # Roll rule: after-close releases on an origin enter next eligible decision origin
+                    if k_idx + 1 < len(orig_dates_list):
+                        rolled_count += 1
+                        next_dt = orig_dates_list[k_idx + 1]
+                        # Apply to next_dt macro_impulse if eligible
+                        if not pd.isna(surp) and ind in fold_macro_betas:
+                            b_info = fold_macro_betas[ind]
+                            if b_info.get("status") == "ESTIMATED_CAUSAL" and b_info.get("n_events", 0) >= 8:
+                                if strategy_type in ("2s5s10s", "fly"):
+                                    b_target = b_info.get("curvature_beta", 0.0)
+                                else:
+                                    b_target = b_info.get("slope_beta", 0.0)
+                                macro_impulse.loc[next_dt] += b_target * np.clip(surp, -2.0, 2.0)
                     continue
+                
+                # Timestamp available for decision origin dt (AVAILABLE or LEGACY_DATE_ONLY_ASSUMED)
                 ts_avail_count += 1
+                if avail_audit.status == MacroTimestampAudit.AVAILABLE:
+                    ts_verified_count += 1
+                else:
+                    legacy_date_assumed_count += 1
                 
                 if pd.isna(surp):
+                    missing_surp_count += 1
                     continue
                 usable_surp_count += 1
                 
                 if surp == 0.0:
                     zero_surp_count += 1
                     
-                if ind not in fold_macro_betas:
+                # Check coefficient eligibility: require status == "ESTIMATED_CAUSAL" and n_events >= 8
+                b_info = fold_macro_betas.get(ind, {})
+                is_eligible = (
+                    b_info.get("status") == "ESTIMATED_CAUSAL" and
+                    b_info.get("n_events", 0) >= 8
+                )
+                
+                if not is_eligible:
                     inadequate_hist_count += 1
                     continue
-                eligible_coeff_count += 1
                 
-                b_info = fold_macro_betas[ind]
+                eligible_coeff_count += 1
                 if strategy_type in ("2s5s10s", "fly"):
                     b_target = b_info.get("curvature_beta", 0.0)
                 else:
                     b_target = b_info.get("slope_beta", 0.0)
-                macro_impulse.loc[dt] += b_target * np.clip(surp, -2.0, 2.0)
+                impulse_val = b_target * np.clip(surp, -2.0, 2.0)
+                macro_impulse.loc[dt] += impulse_val
+                
+                if impulse_val != 0.0:
+                    active_overlay_count += 1
+                else:
+                    zero_impact_count += 1
             
             nonzero_macro_days = int((macro_impulse != 0.0).sum())
+            fold_macro_audit[-1]["observed_decision_events"] = eval_dec_count
             fold_macro_audit[-1]["evaluated_decision_events"] = eval_dec_count
+            fold_macro_audit[-1]["timestamp_verified_available_events"] = ts_verified_count
+            fold_macro_audit[-1]["legacy_date_only_assumed_events"] = legacy_date_assumed_count
             fold_macro_audit[-1]["timestamp_available_events"] = ts_avail_count
             fold_macro_audit[-1]["post_close_events"] = post_close_count
+            fold_macro_audit[-1]["rolled_to_next_decision_events"] = rolled_count
+            fold_macro_audit[-1]["invalid_timestamp_rejected_events"] = invalid_ts_rejected_count
+            fold_macro_audit[-1]["missing_surprise_events"] = missing_surp_count
             fold_macro_audit[-1]["usable_surprise_events"] = usable_surp_count
             fold_macro_audit[-1]["zero_surprise_events"] = zero_surp_count
             fold_macro_audit[-1]["eligible_coefficient_events"] = eligible_coeff_count
             fold_macro_audit[-1]["inadequate_history_events"] = inadequate_hist_count
+            fold_macro_audit[-1]["active_overlay_events"] = active_overlay_count
+            fold_macro_audit[-1]["zero_impact_events"] = zero_impact_count
             fold_macro_audit[-1]["nonzero_macro_days"] = nonzero_macro_days
             
             macro_scale = macro_impulse.loc[orig_dates].values / train_spread_std
@@ -752,7 +974,7 @@ class WalkForwardHarness:
             raw_signals["DNS_Kalman_Macro"].extend(macro_overlay_input.tolist())
             stage_inputs["DNS_Kalman_Macro"].extend(macro_overlay_input.tolist())
             stage_outputs["DNS_Kalman_Macro"].extend(sig_macro_arr.tolist())
-            inherited_dns_clipping["DNS_Kalman_Macro"].extend((np.abs(raw_kf) > 1.0).tolist())
+            inherited_dns_clipping["DNS_Kalman_Macro"].extend(diag_kf["is_clipped"].tolist() if isinstance(diag_kf["is_clipped"], np.ndarray) else [diag_kf["is_clipped"]])
             additional_clipping["DNS_Kalman_Macro"].extend((np.abs(macro_overlay_input) > 1.0).tolist())
             saturation_flags["DNS_Kalman_Macro"].extend((np.abs(sig_macro_arr) >= 1.0 - 1e-6).tolist())
             
@@ -839,17 +1061,17 @@ class WalkForwardHarness:
                                     fly_2s5s10s_sq_errors["GBM"].append(diff_fly ** 2)
 
                                 # Signal formed at orig_dt for horizon orig_dt -> tgt_dt
-                                sig_gbm_val = map_curve_forecast_to_spread_signal(
-                                    c_hat, y_origin_all[k], tenor_cols, train_spread_std, strategy_type
+                                sig_gbm_val, diag_gbm = map_curve_forecast_to_spread_signal(
+                                    c_hat, y_origin_all[k], tenor_cols, train_spread_std, strategy_type, return_details=True
                                 )
                                 sig_gbm_series.loc[orig_dt] = float(sig_gbm_val)
-                                diff_raw_gbm = (float(sp_pred["2s10s"].item()) - float(sp_curr[k])) / train_spread_std
-                                raw_signals["GBM"].append(float(diff_raw_gbm))
-                                stage_inputs["GBM"].append(float(diff_raw_gbm))
+                                raw_gbm_val = float(diag_gbm["raw_input"])
+                                raw_signals["GBM"].append(raw_gbm_val)
+                                stage_inputs["GBM"].append(raw_gbm_val)
                                 stage_outputs["GBM"].append(float(sig_gbm_val))
                                 inherited_dns_clipping["GBM"].append(False)
-                                additional_clipping["GBM"].append(bool(abs(diff_raw_gbm) > 1.0))
-                                saturation_flags["GBM"].append(bool(abs(sig_gbm_val) >= 1.0 - 1e-6))
+                                additional_clipping["GBM"].append(bool(diag_gbm["is_clipped"]))
+                                saturation_flags["GBM"].append(bool(diag_gbm["is_saturated"]))
 
                                 for c_idx, c in enumerate(tenor_cols):
                                     ledger.add_record(ForecastRecord(
@@ -1022,13 +1244,21 @@ class WalkForwardHarness:
         total_test_macro_events = sum(f.get("test_event_count", 0) for f in fold_macro_audit)
         total_calendar_events = sum(f.get("calendar_event_count", 0) for f in fold_macro_audit)
         total_train_macro_events = sum(f.get("training_event_count", 0) for f in fold_macro_audit)
+        total_observed_decision_events = sum(f.get("observed_decision_events", 0) for f in fold_macro_audit)
         total_evaluated_decision_events = sum(f.get("evaluated_decision_events", 0) for f in fold_macro_audit)
+        total_timestamp_verified_available_events = sum(f.get("timestamp_verified_available_events", 0) for f in fold_macro_audit)
+        total_legacy_date_only_assumed_events = sum(f.get("legacy_date_only_assumed_events", 0) for f in fold_macro_audit)
         total_timestamp_available_events = sum(f.get("timestamp_available_events", 0) for f in fold_macro_audit)
         total_post_close_events = sum(f.get("post_close_events", 0) for f in fold_macro_audit)
+        total_rolled_to_next_decision_events = sum(f.get("rolled_to_next_decision_events", 0) for f in fold_macro_audit)
+        total_invalid_timestamp_rejected_events = sum(f.get("invalid_timestamp_rejected_events", 0) for f in fold_macro_audit)
+        total_missing_surprise_events = sum(f.get("missing_surprise_events", 0) for f in fold_macro_audit)
         total_usable_surprise_events = sum(f.get("usable_surprise_events", 0) for f in fold_macro_audit)
         total_zero_surprise_events = sum(f.get("zero_surprise_events", 0) for f in fold_macro_audit)
         total_eligible_coefficient_events = sum(f.get("eligible_coefficient_events", 0) for f in fold_macro_audit)
         total_inadequate_history_events = sum(f.get("inadequate_history_events", 0) for f in fold_macro_audit)
+        total_active_overlay_events = sum(f.get("active_overlay_events", 0) for f in fold_macro_audit)
+        total_zero_impact_events = sum(f.get("zero_impact_events", 0) for f in fold_macro_audit)
         total_nonzero_macro_days = sum(f.get("nonzero_macro_days", 0) for f in fold_macro_audit)
 
         if total_evaluated_decision_events == 0:
@@ -1234,13 +1464,21 @@ class WalkForwardHarness:
                 "total_training_events": total_train_macro_events,
                 "total_calendar_events": total_calendar_events,
                 "total_test_events": total_calendar_events,
+                "total_observed_decision_events": total_observed_decision_events,
                 "total_evaluated_decision_events": total_evaluated_decision_events,
+                "total_timestamp_verified_available_events": total_timestamp_verified_available_events,
+                "total_legacy_date_only_assumed_events": total_legacy_date_only_assumed_events,
                 "total_timestamp_available_events": total_timestamp_available_events,
                 "total_post_close_events": total_post_close_events,
+                "total_rolled_to_next_decision_events": total_rolled_to_next_decision_events,
+                "total_invalid_timestamp_rejected_events": total_invalid_timestamp_rejected_events,
+                "total_missing_surprise_events": total_missing_surprise_events,
                 "total_usable_surprise_events": total_usable_surprise_events,
                 "total_zero_surprise_events": total_zero_surprise_events,
                 "total_eligible_coefficient_events": total_eligible_coefficient_events,
                 "total_inadequate_history_events": total_inadequate_history_events,
+                "total_active_overlay_events": total_active_overlay_events,
+                "total_zero_impact_events": total_zero_impact_events,
                 "nonzero_macro_days": total_nonzero_macro_days,
                 "curve_forecast_provenance": "COPIED_DNS_CURVE_FORECAST",
                 "strategy_overlay_status": "ACTIVE_OVERLAY" if total_nonzero_macro_days > 0 else (
@@ -1262,6 +1500,17 @@ class WalkForwardHarness:
                 "actual_clipping_frequency_pct": additional_clipping_stats,
                 "signal_clipping_frequency_pct": additional_clipping_stats,
                 "final_position_saturation_pct": final_saturation_stats,
+                "saturation_bounds": {
+                    "DNS_Scaled_60": 0.60,
+                    "DNS_Kalman_Macro": 1.00,
+                    "Random_Walk": 1.00,
+                    "PCA_VAR": 1.00,
+                    "Static_NS": 1.00,
+                    "DNS_Kalman": 1.00,
+                    "Static_NS_Residual_Preserving": 1.00,
+                    "DNS_Kalman_Residual_Preserving": 1.00,
+                    "GBM": 1.00,
+                },
                 "mean_unclipped_signal_std": mean_unclipped_stats,
                 "signal_correlations": sig_corr_matrix,
                 "residual_preserving_comparison": {
