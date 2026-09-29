@@ -32,13 +32,82 @@ from statsmodels.tsa.api import VAR
 
 
 def get_git_commit_hash() -> str:
-    """Retrieve current git commit hash for run provenance."""
+    """Retrieve current git commit hash and dirty status for run provenance."""
     try:
-        return subprocess.check_output(
+        commit = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
         ).decode().strip()
+        status = subprocess.check_output(
+            ["git", "status", "--porcelain"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+        if status:
+            return f"{commit}-dirty"
+        return commit
     except Exception:
         return "UNKNOWN_COMMIT"
+
+
+def get_git_provenance() -> Dict[str, Any]:
+    """Retrieve comprehensive git provenance including commit, dirty flag, and diff checksum."""
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+        status = subprocess.check_output(
+            ["git", "status", "--porcelain"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+        is_dirty = bool(status)
+        diff_hash = "clean"
+        if is_dirty:
+            diff = subprocess.check_output(
+                ["git", "diff", "HEAD"], stderr=subprocess.DEVNULL
+            )
+            diff_hash = hashlib.sha256(diff).hexdigest()[:16]
+        return {
+            "commit": commit,
+            "is_dirty": is_dirty,
+            "commit_or_dirty": f"{commit}-dirty" if is_dirty else commit,
+            "dirty_tree_hash": diff_hash,
+        }
+    except Exception:
+        return {
+            "commit": "UNKNOWN_COMMIT",
+            "is_dirty": False,
+            "commit_or_dirty": "UNKNOWN_COMMIT",
+            "dirty_tree_hash": "UNKNOWN",
+        }
+
+
+def is_timestamp_available_for_decision(row: Any, dt: pd.Timestamp) -> bool:
+    """
+    Check if macro release was available prior to the decision at market close on date dt.
+    Market close cutoff: 16:00 ET / 21:00 UTC (daylight saving) or 22:00 UTC (standard).
+    If timestamp is missing, naive date, or has 00:00 time, defaults to standard
+    pre-close daytime release assumption (e.g. 8:30 AM / 10:00 AM ET).
+    """
+    if "timestamp" not in row or pd.isna(row["timestamp"]):
+        return True
+    ts = row["timestamp"]
+    if isinstance(ts, pd.Timestamp):
+        if ts.time() == pd.Timestamp("00:00:00").time():
+            return True
+        if ts.tz is not None:
+            # UTC timestamp: after 21:00 UTC (16:00 ET / 17:00 ET) is post-close
+            if ts.date() == dt.date():
+                return ts.hour < 21 or (ts.hour == 21 and ts.minute == 0 and ts.second == 0)
+            elif ts.date() < dt.date():
+                return True
+            else:
+                return False
+        else:
+            # Naive local timestamp
+            if ts.date() == dt.date():
+                return ts.hour < 16 or (ts.hour == 16 and ts.minute == 0 and ts.second == 0)
+            elif ts.date() < dt.date():
+                return True
+            else:
+                return False
+    return True
 
 
 def get_file_checksum(filepath: Union[str, Path]) -> str:
@@ -212,6 +281,11 @@ class WalkForwardHarness:
         # Cumulative out-of-sample predictions, signals, and raw unclipped signal containers
         oos_signals = {m: [] for m in all_eval_models}
         raw_signals = {m: [] for m in all_eval_models}
+        stage_inputs = {m: [] for m in all_eval_models}
+        stage_outputs = {m: [] for m in all_eval_models}
+        inherited_dns_clipping = {m: [] for m in all_eval_models}
+        additional_clipping = {m: [] for m in all_eval_models}
+        saturation_flags = {m: [] for m in all_eval_models}
         curve_sq_errors = {m: [] for m in all_eval_models}
         factor_sq_errors = {m: [] for m in all_eval_models}
         spread_2s10s_sq_errors = {m: [] for m in all_eval_models}
@@ -256,16 +330,32 @@ class WalkForwardHarness:
             else:
                 train_spread_std = 0.05
             
-            # Track macroeconomic events in train vs test windows (Prompt 6 Macro Audit)
-            m_tr = self.macro_df[(self.macro_df["date"] >= train_dates[0]) & (self.macro_df["date"] <= train_dates[-1])]
-            m_te = self.macro_df[(self.macro_df["date"] >= test_dates[0]) & (self.macro_df["date"] <= test_dates[-1])]
+            # Track macroeconomic events in train vs test windows
+            if self.macro_df is not None and not self.macro_df.empty and "date" in self.macro_df.columns:
+                m_tr = self.macro_df[(self.macro_df["date"] >= train_dates[0]) & (self.macro_df["date"] <= train_dates[-1])]
+                m_te_calendar = self.macro_df[(self.macro_df["date"] >= test_dates[0]) & (self.macro_df["date"] <= test_dates[-1])]
+            else:
+                m_tr = pd.DataFrame()
+                m_te_calendar = pd.DataFrame()
+            
             fold_macro_audit.append({
                 "fold_id": f_idx,
                 "train_cutoff": str(train_dates[-1].date()),
                 "test_start": str(test_dates[0].date()),
                 "test_end": str(test_dates[-1].date()),
+                "first_origin": str(orig_dates[0].date()),
+                "last_origin": str(orig_dates[-1].date()),
                 "training_event_count": len(m_tr),
-                "test_event_count": len(m_te),
+                "calendar_event_count": len(m_te_calendar),
+                "test_event_count": len(m_te_calendar),
+                "evaluated_decision_events": 0,
+                "timestamp_available_events": 0,
+                "post_close_events": 0,
+                "usable_surprise_events": 0,
+                "zero_surprise_events": 0,
+                "eligible_coefficient_events": 0,
+                "inadequate_history_events": 0,
+                "nonzero_macro_days": 0,
             })
 
             # --- MODEL 1: RANDOM WALK ---
@@ -285,6 +375,11 @@ class WalkForwardHarness:
             sig_rw = pd.Series(0.0, index=orig_dates)
             oos_signals["Random_Walk"].append(sig_rw)
             raw_signals["Random_Walk"].extend([0.0] * len(orig_dates))
+            stage_inputs["Random_Walk"].extend([0.0] * len(orig_dates))
+            stage_outputs["Random_Walk"].extend([0.0] * len(orig_dates))
+            inherited_dns_clipping["Random_Walk"].extend([False] * len(orig_dates))
+            additional_clipping["Random_Walk"].extend([False] * len(orig_dates))
+            saturation_flags["Random_Walk"].extend([False] * len(orig_dates))
 
             # Record Random Walk in ForecastLedger
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
@@ -329,6 +424,11 @@ class WalkForwardHarness:
             sp_curr = compute_observable_spreads(y_origin_all, tenor_cols)["2s10s"]
             raw_pca = (spreads_pca["2s10s"] - sp_curr) / train_spread_std
             raw_signals["PCA_VAR"].extend(raw_pca.tolist())
+            stage_inputs["PCA_VAR"].extend(raw_pca.tolist())
+            stage_outputs["PCA_VAR"].extend(sig_pca_arr.tolist())
+            inherited_dns_clipping["PCA_VAR"].extend([False] * len(orig_dates))
+            additional_clipping["PCA_VAR"].extend((np.abs(raw_pca) > 1.0).tolist())
+            saturation_flags["PCA_VAR"].extend((np.abs(sig_pca_arr) >= 1.0 - 1e-6).tolist())
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
                 for c_idx, c in enumerate(tenor_cols):
@@ -369,6 +469,11 @@ class WalkForwardHarness:
             oos_signals["Static_NS"].append(sig_ns)
             raw_ns = (spreads_ns["2s10s"] - sp_curr) / train_spread_std
             raw_signals["Static_NS"].extend(raw_ns.tolist())
+            stage_inputs["Static_NS"].extend(raw_ns.tolist())
+            stage_outputs["Static_NS"].extend(sig_ns_arr.tolist())
+            inherited_dns_clipping["Static_NS"].extend([False] * len(orig_dates))
+            additional_clipping["Static_NS"].extend((np.abs(raw_ns) > 1.0).tolist())
+            saturation_flags["Static_NS"].extend((np.abs(sig_ns_arr) >= 1.0 - 1e-6).tolist())
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
                 for c_idx, c in enumerate(tenor_cols):
@@ -434,6 +539,11 @@ class WalkForwardHarness:
             )
             raw_ns_res = (spreads_ns_res["2s10s"] - sp_curr) / train_spread_std
             raw_signals["Static_NS_Residual_Preserving"].extend(raw_ns_res.tolist())
+            stage_inputs["Static_NS_Residual_Preserving"].extend(raw_ns_res.tolist())
+            stage_outputs["Static_NS_Residual_Preserving"].extend(sig_ns_res_arr.tolist())
+            inherited_dns_clipping["Static_NS_Residual_Preserving"].extend([False] * len(orig_dates))
+            additional_clipping["Static_NS_Residual_Preserving"].extend((np.abs(raw_ns_res) > 1.0).tolist())
+            saturation_flags["Static_NS_Residual_Preserving"].extend((np.abs(sig_ns_res_arr) >= 1.0 - 1e-6).tolist())
             sig_ns_res = pd.Series(sig_ns_res_arr, index=orig_dates)
             oos_signals["Static_NS_Residual_Preserving"].append(sig_ns_res)
             
@@ -484,6 +594,11 @@ class WalkForwardHarness:
             oos_signals["DNS_Kalman"].append(sig_kf)
             raw_kf = (spreads_kf["2s10s"] - sp_curr) / train_spread_std
             raw_signals["DNS_Kalman"].extend(raw_kf.tolist())
+            stage_inputs["DNS_Kalman"].extend(raw_kf.tolist())
+            stage_outputs["DNS_Kalman"].extend(sig_kf_arr.tolist())
+            inherited_dns_clipping["DNS_Kalman"].extend([False] * len(orig_dates))
+            additional_clipping["DNS_Kalman"].extend((np.abs(raw_kf) > 1.0).tolist())
+            saturation_flags["DNS_Kalman"].extend((np.abs(sig_kf_arr) >= 1.0 - 1e-6).tolist())
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
                 for c_idx, c in enumerate(tenor_cols):
@@ -524,6 +639,11 @@ class WalkForwardHarness:
             )
             raw_kf_res = (spreads_kf_res["2s10s"] - sp_curr) / train_spread_std
             raw_signals["DNS_Kalman_Residual_Preserving"].extend(raw_kf_res.tolist())
+            stage_inputs["DNS_Kalman_Residual_Preserving"].extend(raw_kf_res.tolist())
+            stage_outputs["DNS_Kalman_Residual_Preserving"].extend(sig_kf_res_arr.tolist())
+            inherited_dns_clipping["DNS_Kalman_Residual_Preserving"].extend([False] * len(orig_dates))
+            additional_clipping["DNS_Kalman_Residual_Preserving"].extend((np.abs(raw_kf_res) > 1.0).tolist())
+            saturation_flags["DNS_Kalman_Residual_Preserving"].extend((np.abs(sig_kf_res_arr) >= 1.0 - 1e-6).tolist())
             sig_kf_res = pd.Series(sig_kf_res_arr, index=orig_dates)
             oos_signals["DNS_Kalman_Residual_Preserving"].append(sig_kf_res)
 
@@ -538,9 +658,15 @@ class WalkForwardHarness:
                 factor_sq_errors["DNS_Scaled_60"].extend(((spreads_act["2s10s"] - spreads_kf["2s10s"]) ** 2).flatten())
             if "2s5s10s" in spreads_kf and "2s5s10s" in spreads_act:
                 fly_2s5s10s_sq_errors["DNS_Scaled_60"].extend(((spreads_act["2s5s10s"] - spreads_kf["2s5s10s"]) ** 2).flatten())
-            sig_scaled_60 = pd.Series(0.60 * sig_kf_arr, index=orig_dates)
+            control_input = 0.60 * sig_kf_arr
+            sig_scaled_60 = pd.Series(control_input, index=orig_dates)
             oos_signals["DNS_Scaled_60"].append(sig_scaled_60)
-            raw_signals["DNS_Scaled_60"].extend((0.60 * raw_kf).tolist())
+            raw_signals["DNS_Scaled_60"].extend(control_input.tolist())
+            stage_inputs["DNS_Scaled_60"].extend(control_input.tolist())
+            stage_outputs["DNS_Scaled_60"].extend(control_input.tolist())
+            inherited_dns_clipping["DNS_Scaled_60"].extend((np.abs(raw_kf) > 1.0).tolist())
+            additional_clipping["DNS_Scaled_60"].extend([False] * len(orig_dates))
+            saturation_flags["DNS_Scaled_60"].extend((np.abs(control_input) >= 0.60 - 1e-6).tolist())
             
             # --- MODEL 5: DNS + KALMAN + MACRO ---
             curve_sq_errors["DNS_Kalman_Macro"].extend(((y_test.values - y_pred_kf) ** 2).flatten())
@@ -561,33 +687,77 @@ class WalkForwardHarness:
             
             # Join macro releases by availability at decision origin (orig_dates)
             # Releases on orig_dt (e.g. 8:30 AM / 14:00) are available at orig_dt close; target-date releases are future.
-            macro_sub = self.macro_df[
-                (self.macro_df["date"] >= orig_dates[0]) & (self.macro_df["date"] <= orig_dates[-1])
-            ]
+            if self.macro_df is not None and not self.macro_df.empty and "date" in self.macro_df.columns:
+                macro_sub = self.macro_df[self.macro_df["date"].isin(orig_dates)]
+            else:
+                macro_sub = pd.DataFrame()
             macro_impulse = pd.Series(0.0, index=orig_dates)
+            
+            eval_dec_count = 0
+            ts_avail_count = 0
+            post_close_count = 0
+            usable_surp_count = 0
+            zero_surp_count = 0
+            eligible_coeff_count = 0
+            inadequate_hist_count = 0
+            orig_release_dates = set()
+
             for _, m_row in macro_sub.iterrows():
                 dt = m_row["date"]
                 ind = m_row.get("indicator")
                 surp = m_row.get("surprise_ann", np.nan)
-                if pd.notna(surp) and dt in macro_impulse.index:
-                    b_info = fold_macro_betas.get(ind, {"slope_beta": 0.0, "curvature_beta": 0.0})
-                    if strategy_type in ("2s5s10s", "fly"):
-                        b_target = b_info.get("curvature_beta", 0.0)
-                    else:
-                        b_target = b_info.get("slope_beta", 0.0)
-                    macro_impulse.loc[dt] += b_target * np.clip(surp, -2.0, 2.0)
+                
+                eval_dec_count += 1
+                orig_release_dates.add(dt)
+                
+                if not is_timestamp_available_for_decision(m_row, dt):
+                    post_close_count += 1
+                    continue
+                ts_avail_count += 1
+                
+                if pd.isna(surp):
+                    continue
+                usable_surp_count += 1
+                
+                if surp == 0.0:
+                    zero_surp_count += 1
+                    
+                if ind not in fold_macro_betas:
+                    inadequate_hist_count += 1
+                    continue
+                eligible_coeff_count += 1
+                
+                b_info = fold_macro_betas[ind]
+                if strategy_type in ("2s5s10s", "fly"):
+                    b_target = b_info.get("curvature_beta", 0.0)
+                else:
+                    b_target = b_info.get("slope_beta", 0.0)
+                macro_impulse.loc[dt] += b_target * np.clip(surp, -2.0, 2.0)
             
             nonzero_macro_days = int((macro_impulse != 0.0).sum())
+            fold_macro_audit[-1]["evaluated_decision_events"] = eval_dec_count
+            fold_macro_audit[-1]["timestamp_available_events"] = ts_avail_count
+            fold_macro_audit[-1]["post_close_events"] = post_close_count
+            fold_macro_audit[-1]["usable_surprise_events"] = usable_surp_count
+            fold_macro_audit[-1]["zero_surprise_events"] = zero_surp_count
+            fold_macro_audit[-1]["eligible_coefficient_events"] = eligible_coeff_count
+            fold_macro_audit[-1]["inadequate_history_events"] = inadequate_hist_count
             fold_macro_audit[-1]["nonzero_macro_days"] = nonzero_macro_days
             
             macro_scale = macro_impulse.loc[orig_dates].values / train_spread_std
-            sig_macro_arr = np.clip(0.6 * sig_kf_arr + 0.4 * macro_scale, -1.0, 1.0)
+            macro_overlay_input = 0.60 * sig_kf_arr + 0.40 * macro_scale
+            sig_macro_arr = np.clip(macro_overlay_input, -1.0, 1.0)
             sig_macro_dns = pd.Series(sig_macro_arr, index=orig_dates)
             oos_signals["DNS_Kalman_Macro"].append(sig_macro_dns)
-            raw_macro = 0.6 * raw_kf + 0.4 * macro_scale
-            raw_signals["DNS_Kalman_Macro"].extend(raw_macro.tolist())
+            raw_signals["DNS_Kalman_Macro"].extend(macro_overlay_input.tolist())
+            stage_inputs["DNS_Kalman_Macro"].extend(macro_overlay_input.tolist())
+            stage_outputs["DNS_Kalman_Macro"].extend(sig_macro_arr.tolist())
+            inherited_dns_clipping["DNS_Kalman_Macro"].extend((np.abs(raw_kf) > 1.0).tolist())
+            additional_clipping["DNS_Kalman_Macro"].extend((np.abs(macro_overlay_input) > 1.0).tolist())
+            saturation_flags["DNS_Kalman_Macro"].extend((np.abs(sig_macro_arr) >= 1.0 - 1e-6).tolist())
             
             for k, (orig_dt, tgt_dt) in enumerate(origin_target_pairs):
+                # 1. Unconditionally tag curve forecast as copied from DNS Kalman
                 for c_idx, c in enumerate(tenor_cols):
                     ledger.add_record(ForecastRecord(
                         run_id=ledger.run_id,
@@ -601,8 +771,30 @@ class WalkForwardHarness:
                         forecast=float(y_pred_kf[k, c_idx]),
                         actual=float(y_test.iloc[k, c_idx]),
                         status=ForecastStatus.SCORED,
-                        reason="COPIED_DNS_CURVE_FORECAST" if nonzero_macro_days == 0 else "MACRO_CONDITIONED",
+                        reason="COPIED_DNS_CURVE_FORECAST",
                     ))
+                # 2. Record macro position overlay independently
+                overlay_val = float(macro_scale[k])
+                if overlay_val != 0.0:
+                    overlay_reason = "ACTIVE_OVERLAY"
+                elif orig_dt in orig_release_dates:
+                    overlay_reason = "ZERO_OVERLAY_EVENT"
+                else:
+                    overlay_reason = "NO_RELEASES"
+                ledger.add_record(ForecastRecord(
+                    run_id=ledger.run_id,
+                    model_id="DNS_Kalman_Macro",
+                    fold_id=f_idx,
+                    training_cutoff=train_dates[-1],
+                    origin_timestamp=orig_dt,
+                    target_timestamp=tgt_dt,
+                    target_type="macro_position_overlay",
+                    target_name="2s10s_overlay",
+                    forecast=overlay_val,
+                    actual=None,
+                    status=ForecastStatus.SCORED,
+                    reason=overlay_reason,
+                ))
 
             # --- MODEL 6: GRADIENT BOOSTED MODEL (GBM) ---
             if hasattr(self, "X_ml") and not self.X_ml.empty:
@@ -653,6 +845,11 @@ class WalkForwardHarness:
                                 sig_gbm_series.loc[orig_dt] = float(sig_gbm_val)
                                 diff_raw_gbm = (float(sp_pred["2s10s"].item()) - float(sp_curr[k])) / train_spread_std
                                 raw_signals["GBM"].append(float(diff_raw_gbm))
+                                stage_inputs["GBM"].append(float(diff_raw_gbm))
+                                stage_outputs["GBM"].append(float(sig_gbm_val))
+                                inherited_dns_clipping["GBM"].append(False)
+                                additional_clipping["GBM"].append(bool(abs(diff_raw_gbm) > 1.0))
+                                saturation_flags["GBM"].append(bool(abs(sig_gbm_val) >= 1.0 - 1e-6))
 
                                 for c_idx, c in enumerate(tenor_cols):
                                     ledger.add_record(ForecastRecord(
@@ -670,6 +867,11 @@ class WalkForwardHarness:
                                     ))
                             else:
                                 raw_signals["GBM"].append(0.0)
+                                stage_inputs["GBM"].append(0.0)
+                                stage_outputs["GBM"].append(0.0)
+                                inherited_dns_clipping["GBM"].append(False)
+                                additional_clipping["GBM"].append(False)
+                                saturation_flags["GBM"].append(False)
                                 for c in tenor_cols:
                                     ledger.add_unavailable(
                                         model_id="GBM",
@@ -699,6 +901,11 @@ class WalkForwardHarness:
                                 )
                         oos_signals["GBM"].append(pd.Series(0.0, index=orig_dates))
                         raw_signals["GBM"].extend([0.0] * len(orig_dates))
+                        stage_inputs["GBM"].extend([0.0] * len(orig_dates))
+                        stage_outputs["GBM"].extend([0.0] * len(orig_dates))
+                        inherited_dns_clipping["GBM"].extend([False] * len(orig_dates))
+                        additional_clipping["GBM"].extend([False] * len(orig_dates))
+                        saturation_flags["GBM"].extend([False] * len(orig_dates))
                 else:
                     for orig_dt, tgt_dt in origin_target_pairs:
                         for c in tenor_cols:
@@ -714,6 +921,11 @@ class WalkForwardHarness:
                             )
                     oos_signals["GBM"].append(pd.Series(0.0, index=orig_dates))
                     raw_signals["GBM"].extend([0.0] * len(orig_dates))
+                    stage_inputs["GBM"].extend([0.0] * len(orig_dates))
+                    stage_outputs["GBM"].extend([0.0] * len(orig_dates))
+                    inherited_dns_clipping["GBM"].extend([False] * len(orig_dates))
+                    additional_clipping["GBM"].extend([False] * len(orig_dates))
+                    saturation_flags["GBM"].extend([False] * len(orig_dates))
             else:
                 for orig_dt, tgt_dt in origin_target_pairs:
                     for c in tenor_cols:
@@ -729,6 +941,11 @@ class WalkForwardHarness:
                         )
                 oos_signals["GBM"].append(pd.Series(0.0, index=orig_dates))
                 raw_signals["GBM"].extend([0.0] * len(orig_dates))
+                stage_inputs["GBM"].extend([0.0] * len(orig_dates))
+                stage_outputs["GBM"].extend([0.0] * len(orig_dates))
+                inherited_dns_clipping["GBM"].extend([False] * len(orig_dates))
+                additional_clipping["GBM"].extend([False] * len(orig_dates))
+                saturation_flags["GBM"].extend([False] * len(orig_dates))
 
         # Concatenate out-of-sample series and execute backtests across all evaluated and diagnostic models
         all_test_dates = [dt for _, test_dates in folds for dt in test_dates]
@@ -801,14 +1018,32 @@ class WalkForwardHarness:
                 "Collateral Net PnL ($)": met.get("total_collateral_pnl_usd", met.get("total_net_pnl_usd", 0.0)),
             }
             
-        # Macro audit statistics
+        # Macro audit statistics across all evaluated folds
         total_test_macro_events = sum(f.get("test_event_count", 0) for f in fold_macro_audit)
+        total_calendar_events = sum(f.get("calendar_event_count", 0) for f in fold_macro_audit)
         total_train_macro_events = sum(f.get("training_event_count", 0) for f in fold_macro_audit)
+        total_evaluated_decision_events = sum(f.get("evaluated_decision_events", 0) for f in fold_macro_audit)
+        total_timestamp_available_events = sum(f.get("timestamp_available_events", 0) for f in fold_macro_audit)
+        total_post_close_events = sum(f.get("post_close_events", 0) for f in fold_macro_audit)
+        total_usable_surprise_events = sum(f.get("usable_surprise_events", 0) for f in fold_macro_audit)
+        total_zero_surprise_events = sum(f.get("zero_surprise_events", 0) for f in fold_macro_audit)
+        total_eligible_coefficient_events = sum(f.get("eligible_coefficient_events", 0) for f in fold_macro_audit)
+        total_inadequate_history_events = sum(f.get("inadequate_history_events", 0) for f in fold_macro_audit)
         total_nonzero_macro_days = sum(f.get("nonzero_macro_days", 0) for f in fold_macro_audit)
 
+        if total_evaluated_decision_events == 0:
+            macro_eval_status = "NOT_EVALUATED (NO_TEST_RELEASES)"
+        elif total_nonzero_macro_days == 0:
+            macro_eval_status = "INACTIVE_OVERLAY (ZERO_SURPRISE_OR_INADEQUATE_HISTORY)"
+        else:
+            macro_eval_status = "VALID_MACRO_TEST"
+
         # Synchronize macro evaluation status across baseline_table, common_sample_table, and ledger
-        if total_test_macro_events == 0 and "DNS_Kalman_Macro" in all_model_metrics:
-            all_model_metrics["DNS_Kalman_Macro"]["Forecast Status"] = "NOT_EVALUATED (NO_TEST_RELEASES)"
+        if "DNS_Kalman_Macro" in all_model_metrics:
+            if total_evaluated_decision_events == 0:
+                all_model_metrics["DNS_Kalman_Macro"]["Forecast Status"] = "NOT_EVALUATED (NO_TEST_RELEASES)"
+            elif total_nonzero_macro_days == 0:
+                all_model_metrics["DNS_Kalman_Macro"]["Forecast Status"] = "INACTIVE_OVERLAY (ZERO_SURPRISE_OR_INADEQUATE_HISTORY)"
 
         # Build baseline_table strictly for the 6 primary evaluated models
         baseline_rows = [all_model_metrics[m] for m in models]
@@ -833,10 +1068,13 @@ class WalkForwardHarness:
             orig_row = all_model_metrics[m]
             display_name, role = ROLE_MAP.get(m, (orig_row["Model / Forecast Method"], "Model Baseline"))
             
-            # Audit status: if test window has zero macro events, relabel macro model explicitly
+            # Audit status: separate curve provenance from strategy overlay activity
             f_status = orig_row["Forecast Status"]
-            if m == "DNS_Kalman_Macro" and total_test_macro_events == 0:
-                f_status = "NOT_EVALUATED (NO_TEST_RELEASES)"
+            if m == "DNS_Kalman_Macro":
+                if total_evaluated_decision_events == 0:
+                    f_status = "NOT_EVALUATED (NO_TEST_RELEASES)"
+                elif total_nonzero_macro_days == 0:
+                    f_status = "INACTIVE_OVERLAY (ZERO_SURPRISE_OR_INADEQUATE_HISTORY)"
             elif m == "DNS_Scaled_60":
                 f_status = "CONTROL (SCALED_DNS)"
             elif "Residual_Preserving" in m:
@@ -934,6 +1172,7 @@ class WalkForwardHarness:
                 "factor_dynamics_spread_mse_bp2": round(fac_mse, 2),
                 "cross_sectional_fit_spread_rmse_bp": round(fit_rmse, 2),
                 "cross_sectional_fit_spread_mse_bp2": round(fit_mse, 2),
+                "uncentered_cross_moment_bp2": round(cross_term, 2),
                 "cross_term_cov_bp2": round(cross_term, 2),
                 "sum_components_mse_bp2": round(fac_mse + fit_mse + cross_term, 2),
                 "identity_holds": abs(tot_mse - (fac_mse + fit_mse + cross_term)) < 1e-4,
@@ -942,28 +1181,34 @@ class WalkForwardHarness:
             decomp_dict = {}
 
         raw_threshold_exceedance_stats = {}
-        actual_clipping_stats = {}
-        clipping_stats = {}
+        inherited_clipping_stats = {}
+        additional_clipping_stats = {}
+        final_saturation_stats = {}
         mean_unclipped_stats = {}
+
         for m in all_eval_models:
-            raw_arr = np.array(raw_signals[m])
-            if len(raw_arr) > 0:
-                raw_threshold_exceedance_stats[m] = round(float(np.mean(np.abs(raw_arr) >= 1.0 - 1e-9) * 100.0), 2)
-                actual_clipping_stats[m] = round(float(np.mean(np.abs(raw_arr) > 1.0 + 1e-9) * 100.0), 2)
-                clipping_stats[m] = actual_clipping_stats[m]
-                mean_unclipped_stats[m] = round(float(np.mean(np.abs(raw_arr))), 3)
+            inp_arr = np.array(stage_inputs[m])
+            if len(inp_arr) > 0:
+                raw_threshold_exceedance_stats[m] = round(float(np.mean(np.abs(inp_arr) >= 1.0 - 1e-9) * 100.0), 2)
+                inherited_clipping_stats[m] = round(float(np.mean(inherited_dns_clipping[m]) * 100.0), 2)
+                additional_clipping_stats[m] = round(float(np.mean(additional_clipping[m]) * 100.0), 2)
+                final_saturation_stats[m] = round(float(np.mean(saturation_flags[m]) * 100.0), 2)
+                mean_unclipped_stats[m] = round(float(np.mean(np.abs(inp_arr))), 3)
             else:
                 raw_threshold_exceedance_stats[m] = np.nan
-                actual_clipping_stats[m] = np.nan
-                clipping_stats[m] = np.nan
+                inherited_clipping_stats[m] = np.nan
+                additional_clipping_stats[m] = np.nan
+                final_saturation_stats[m] = np.nan
                 mean_unclipped_stats[m] = np.nan
 
         sig_dict = {m: pd.concat(oos_signals[m]).values for m in all_eval_models if len(oos_signals[m]) > 0}
         sig_df = pd.DataFrame(sig_dict)
         sig_corr_matrix = sig_df.corr().round(4).to_dict() if not sig_df.empty else {}
 
+        git_prov = get_git_provenance()
         run_metadata = {
-            "git_commit": get_git_commit_hash(),
+            "git_commit": git_prov["commit_or_dirty"],
+            "git_provenance": git_prov,
             "data_checksums": {
                 "yield_panel": get_file_checksum("data/processed/yield_panel.parquet"),
                 "factor_panel": get_file_checksum("data/processed/factor_panel.parquet"),
@@ -987,19 +1232,36 @@ class WalkForwardHarness:
             "ledger_summary": ledger.summary_by_model(),
             "macro_event_audit": {
                 "total_training_events": total_train_macro_events,
-                "total_test_events": total_test_macro_events,
+                "total_calendar_events": total_calendar_events,
+                "total_test_events": total_calendar_events,
+                "total_evaluated_decision_events": total_evaluated_decision_events,
+                "total_timestamp_available_events": total_timestamp_available_events,
+                "total_post_close_events": total_post_close_events,
+                "total_usable_surprise_events": total_usable_surprise_events,
+                "total_zero_surprise_events": total_zero_surprise_events,
+                "total_eligible_coefficient_events": total_eligible_coefficient_events,
+                "total_inadequate_history_events": total_inadequate_history_events,
                 "nonzero_macro_days": total_nonzero_macro_days,
-                "evaluation_status": "VALID_MACRO_TEST" if total_test_macro_events > 0 else "NOT_EVALUATED (NO_TEST_RELEASES)",
+                "curve_forecast_provenance": "COPIED_DNS_CURVE_FORECAST",
+                "strategy_overlay_status": "ACTIVE_OVERLAY" if total_nonzero_macro_days > 0 else (
+                    "INACTIVE_ZERO_RELEASES" if total_evaluated_decision_events == 0 else "INACTIVE_ZERO_SURPRISE_OR_INADEQUATE_HISTORY"
+                ),
+                "evaluation_status": macro_eval_status,
                 "fold_breakdown": fold_macro_audit,
             },
             "econometric_diagnostics": {
                 "ns_contemporaneous_fit_rmse_bp": round(ns_fit_rmse_bp, 2),
+                "factor_coordinate_rmse_ar1_bp": round(factor_ar1_rmse_bp, 2),
+                "factor_coordinate_rmse_random_walk_bp": round(factor_rw_rmse_bp, 2),
                 "factor_rmse_ar1_bp": round(factor_ar1_rmse_bp, 2),
                 "factor_rmse_random_walk_bp": round(factor_rw_rmse_bp, 2),
                 "observable_2s10s_spread_decomposition": decomp_dict,
                 "raw_signal_threshold_exceedance_pct": raw_threshold_exceedance_stats,
-                "actual_clipping_frequency_pct": actual_clipping_stats,
-                "signal_clipping_frequency_pct": clipping_stats,
+                "inherited_dns_clipping_pct": inherited_clipping_stats,
+                "additional_clipping_frequency_pct": additional_clipping_stats,
+                "actual_clipping_frequency_pct": additional_clipping_stats,
+                "signal_clipping_frequency_pct": additional_clipping_stats,
+                "final_position_saturation_pct": final_saturation_stats,
                 "mean_unclipped_signal_std": mean_unclipped_stats,
                 "signal_correlations": sig_corr_matrix,
                 "residual_preserving_comparison": {

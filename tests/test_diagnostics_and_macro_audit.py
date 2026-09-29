@@ -385,3 +385,271 @@ def test_intraday_response_source_tagging_and_window_clarity(tmp_path):
     legacy_summary = legacy_extractor.extract_window(event, symbol="ZN")
     assert legacy_summary.data_source == "UNKNOWN_UNVERIFIED_CACHE"
     assert (legacy_summary.window_df["data_source"] == "UNKNOWN_UNVERIFIED_CACHE").all()
+
+
+def test_clipping_measurement_at_actual_operation_regression_fixture():
+    """
+    Regression fixture where raw DNS signal = 2.0:
+      DNS = clip(2.0, -1, 1) = 1.0
+      Control = 0.6 * DNS = 0.60
+      Zero-event Macro = clip(0.6 * DNS + 0.4 * 0.0, -1, 1) = 0.60
+    
+    Verifies that:
+      1. DNS output is 1.0, Control output is 0.6, Zero-event Macro output is 0.6.
+      2. Control has 0.0% additional clipping and 0.0% raw threshold exceedance beyond 1.0.
+      3. Zero-event Macro has 0.0% additional clipping beyond 1.0.
+      4. Inherited clipping from DNS is tracked for both Control and Macro.
+    """
+    raw_kf = 2.0
+    sig_kf_arr = np.clip(raw_kf, -1.0, 1.0)
+    sig_control = 0.60 * sig_kf_arr
+    macro_scale = 0.0
+    macro_overlay_input = 0.60 * sig_kf_arr + 0.40 * macro_scale
+    sig_macro = np.clip(macro_overlay_input, -1.0, 1.0)
+
+    assert sig_kf_arr == 1.0
+    assert sig_control == 0.60
+    assert sig_macro == 0.60
+
+    # Operation-level assertions
+    assert abs(raw_kf) >= 1.0, "DNS raw input exceeds threshold 1.0"
+    assert abs(raw_kf) > 1.0, "DNS applies clipping"
+    assert abs(sig_control) < 1.0, "Control input never exceeds 1.0"
+    assert abs(macro_overlay_input) < 1.0, "Zero-event macro overlay input never exceeds 1.0"
+
+    # End-to-end WalkForwardHarness verification with raw signal exceedance
+    dates = _make_daily_dates("2024-01-02", 30)
+    tenors = ["DGS3MO", "DGS1", "DGS2", "DGS5", "DGS10", "DGS30"]
+    # Sloped yield curve that produces large raw spread forecast delta
+    yield_data = {t: [2.0 + 0.5 * i] * len(dates) for i, t in enumerate(tenors)}
+    yield_df = pd.DataFrame(yield_data, index=dates)
+
+    factor_df = pd.DataFrame({
+        "level": 4.5 + np.sin(np.arange(len(dates)) / 5.0) * 0.1,
+        "slope": -0.5 + np.cos(np.arange(len(dates)) / 5.0) * 0.1,
+        "curvature": 0.2 + np.sin(np.arange(len(dates)) / 3.0) * 0.05,
+    }, index=dates)
+    macro_df = pd.DataFrame(columns=["date", "indicator", "surprise_ann"])
+
+    cfg = WalkForwardConfig(train_window_days=20, refit_frequency_days=5)
+    harness = WalkForwardHarness(yield_df, factor_df, macro_df, cfg)
+    res = harness.run_walk_forward_evaluation(max_folds=1)
+    econ_diag = res["run_metadata"]["econometric_diagnostics"]
+
+    # Control must have 0% additional clipping and 0% threshold exceedance beyond 1.0
+    assert econ_diag["raw_signal_threshold_exceedance_pct"]["DNS_Scaled_60"] == 0.0
+    assert econ_diag["additional_clipping_frequency_pct"]["DNS_Scaled_60"] == 0.0
+    # Zero-event Macro must have 0% additional clipping beyond 1.0
+    assert econ_diag["raw_signal_threshold_exceedance_pct"]["DNS_Kalman_Macro"] == 0.0
+    assert econ_diag["additional_clipping_frequency_pct"]["DNS_Kalman_Macro"] == 0.0
+    # Saturation of Control is measured at 0.60
+    assert "DNS_Scaled_60" in econ_diag["final_position_saturation_pct"]
+
+
+def test_biased_error_cross_moment_vs_covariance_fixture():
+    """
+    Biased-error fixture proving that the uncentered second cross moment
+    2 * E[u_factor * u_fit] balances the MSE identity, while centered covariance fails.
+    
+    Mathematical proof:
+      e = u_1 + u_2
+      MSE(e) = E[(u_1 + u_2)^2] = E[u_1^2] + E[u_2^2] + 2 E[u_1 * u_2]
+             = MSE(u_1) + MSE(u_2) + 2 * mean(u_1 * u_2)
+      
+      Centered Covariance:
+        Cov(u_1, u_2) = E[u_1 * u_2] - mu_1 * mu_2
+      Therefore:
+        MSE(u_1) + MSE(u_2) + 2 Cov(u_1, u_2) = MSE(e) - 2 * mu_1 * mu_2 != MSE(e)
+    """
+    # Deterministic error sequences with non-zero means (biased forecasts)
+    u_factor = np.array([1.0, 2.0, 3.0])  # mu = 2.0
+    u_fit = np.array([4.0, 2.0, 6.0])     # mu = 4.0
+    e_total = u_factor + u_fit            # [5.0, 4.0, 9.0]
+
+    mse_total = np.mean(e_total ** 2)          # (25 + 16 + 81) / 3 = 122/3 = 40.6667
+    mse_factor = np.mean(u_factor ** 2)        # (1 + 4 + 9) / 3 = 14/3 = 4.6667
+    mse_fit = np.mean(u_fit ** 2)              # (16 + 4 + 36) / 3 = 56/3 = 18.6667
+    
+    # 1. Uncentered second cross moment
+    uncentered_cross_moment = 2.0 * np.mean(u_factor * u_fit)  # 2 * (4 + 4 + 18) / 3 = 52/3 = 17.3333
+    sum_uncentered = mse_factor + mse_fit + uncentered_cross_moment
+    np.testing.assert_allclose(mse_total, sum_uncentered, atol=1e-12)
+
+    # 2. Centered covariance
+    centered_cov = 2.0 * float(np.cov(u_factor, u_fit, bias=True)[0, 1])
+    sum_centered = mse_factor + mse_fit + centered_cov
+    
+    # Prove centered covariance FAILS to balance the MSE identity by exactly 2 * mu_1 * mu_2
+    bias_discrepancy = 2.0 * np.mean(u_factor) * np.mean(u_fit)  # 2 * 2.0 * 4.0 = 16.0
+    assert not np.isclose(mse_total, sum_centered), "Centered covariance must not equal total MSE when errors are biased"
+    np.testing.assert_allclose(mse_total - sum_centered, bias_discrepancy, atol=1e-12)
+
+
+def test_boundary_release_origin_vs_target():
+    """
+    Boundary test for releases at first origin (train_dates[-1]) vs final target (test_dates[-1]):
+    1. A release on first origin train_dates[-1] IS available for the first decision and affects position.
+    2. A release on final target test_dates[-1] is NOT an evaluated decision origin in the fold,
+       and cannot affect any position in the fold.
+    """
+    dates = _make_daily_dates("2024-01-02", 30)
+    tenors = ["DGS3MO", "DGS1", "DGS2", "DGS5", "DGS10", "DGS30"]
+    yield_data = {t: [4.0 + 0.1 * i] * len(dates) for i, t in enumerate(tenors)}
+    yield_df = pd.DataFrame(yield_data, index=dates)
+
+    # Induce responsive slope dynamics correlated with CPI surprises (for causal coefficient estimation)
+    for i in range(10):
+        surp = 1.0 if i % 2 == 0 else -1.0
+        yield_df.loc[dates[2*i + 1]:, "DGS10"] += 0.10 * surp
+
+    factor_df = pd.DataFrame({
+        "level": 4.5 + np.sin(np.arange(len(dates)) / 5.0) * 0.1,
+        "slope": -0.5 + np.cos(np.arange(len(dates)) / 5.0) * 0.1,
+        "curvature": 0.2 + np.sin(np.arange(len(dates)) / 3.0) * 0.05,
+    }, index=dates)
+
+    # 10 training events to establish causal beta
+    macro_rows = [{"date": dates[2*i], "indicator": "CPI", "surprise_ann": 1.0 if i%2==0 else -1.0} for i in range(10)]
+    
+    cfg = WalkForwardConfig(train_window_days=20, refit_frequency_days=5)
+
+    # Case A: Base (no test releases)
+    h_base = WalkForwardHarness(yield_df, factor_df, pd.DataFrame(macro_rows), cfg)
+    res_base = h_base.run_walk_forward_evaluation(max_folds=1)
+    pos_base = res_base["backtest_results"]["DNS_Kalman_Macro"].positions
+
+    # Case B: Injected release on FIRST ORIGIN (dates[19] = train_dates[-1])
+    macro_rows_first_orig = list(macro_rows) + [
+        {"date": dates[19], "indicator": "CPI", "surprise_ann": 2.0}
+    ]
+    h_first = WalkForwardHarness(yield_df, factor_df, pd.DataFrame(macro_rows_first_orig), cfg)
+    res_first = h_first.run_walk_forward_evaluation(max_folds=1)
+    pos_first = res_first["backtest_results"]["DNS_Kalman_Macro"].positions
+
+    # First origin position must change
+    assert not pos_base.loc[dates[19]].equals(pos_first.loc[dates[19]]), (
+        "Release on first origin train_dates[-1] must affect the first evaluated decision"
+    )
+    audit_first = res_first["run_metadata"]["macro_event_audit"]["fold_breakdown"][0]
+    assert audit_first["evaluated_decision_events"] >= 1
+
+    # Case C: Injected release on FINAL TARGET (dates[24] = test_dates[-1])
+    macro_rows_final_tgt = list(macro_rows) + [
+        {"date": dates[24], "indicator": "CPI", "surprise_ann": 2.0}
+    ]
+    h_tgt = WalkForwardHarness(yield_df, factor_df, pd.DataFrame(macro_rows_final_tgt), cfg)
+    res_tgt = h_tgt.run_walk_forward_evaluation(max_folds=1)
+    pos_tgt = res_tgt["backtest_results"]["DNS_Kalman_Macro"].positions
+
+    # Across all evaluated origins (dates[19..23]), positions must remain bit-for-bit identical to base!
+    pd.testing.assert_frame_equal(pos_base.loc[dates[19]:dates[23]], pos_tgt.loc[dates[19]:dates[23]])
+    audit_tgt = res_tgt["run_metadata"]["macro_event_audit"]["fold_breakdown"][0]
+    # In calendar test window, but NOT an evaluated decision origin event
+    assert audit_tgt["calendar_event_count"] >= 1
+    assert audit_tgt["evaluated_decision_events"] == 0
+
+
+def test_timestamp_availability_after_close_enforcement():
+    """
+    Enforce timestamp availability:
+    An announcement on origin date t occurring AFTER market close (e.g. 18:00 ET / 22:00 UTC)
+    cannot affect the market close decision on date t.
+    """
+    dates = _make_daily_dates("2024-01-02", 30)
+    tenors = ["DGS3MO", "DGS1", "DGS2", "DGS5", "DGS10", "DGS30"]
+    yield_data = {t: [4.0 + 0.1 * i] * len(dates) for i, t in enumerate(tenors)}
+    yield_df = pd.DataFrame(yield_data, index=dates)
+
+    # Induce responsive slope dynamics correlated with CPI surprises (for causal coefficient estimation)
+    for i in range(10):
+        surp = 1.0 if i % 2 == 0 else -1.0
+        yield_df.loc[dates[2*i + 1]:, "DGS10"] += 0.10 * surp
+
+    factor_df = pd.DataFrame({
+        "level": 4.5 + np.sin(np.arange(len(dates)) / 5.0) * 0.1,
+        "slope": -0.5 + np.cos(np.arange(len(dates)) / 5.0) * 0.1,
+        "curvature": 0.2 + np.sin(np.arange(len(dates)) / 3.0) * 0.05,
+    }, index=dates)
+
+    macro_rows = [{"date": dates[2*i], "indicator": "CPI", "surprise_ann": 1.0 if i%2==0 else -1.0} for i in range(10)]
+    cfg = WalkForwardConfig(train_window_days=20, refit_frequency_days=5)
+
+    # Base: no test release
+    h_base = WalkForwardHarness(yield_df, factor_df, pd.DataFrame(macro_rows), cfg)
+    res_base = h_base.run_walk_forward_evaluation(max_folds=1)
+    pos_base = res_base["backtest_results"]["DNS_Kalman_Macro"].positions
+
+    t_origin = dates[20]  # decision origin
+
+    # Case A: Post-close release at 22:00 UTC (17:00 / 18:00 ET - after market close)
+    ts_post_close = pd.Timestamp(f"{t_origin.date()} 22:00:00", tz="UTC")
+    macro_post_close = pd.DataFrame(macro_rows + [{
+        "date": t_origin,
+        "timestamp": ts_post_close,
+        "indicator": "CPI",
+        "surprise_ann": 2.0,
+    }])
+    h_post = WalkForwardHarness(yield_df, factor_df, macro_post_close, cfg)
+    res_post = h_post.run_walk_forward_evaluation(max_folds=1)
+    pos_post = res_post["backtest_results"]["DNS_Kalman_Macro"].positions
+
+    # Post-close release CANNOT affect date t_origin position!
+    pd.testing.assert_series_equal(pos_base.loc[t_origin], pos_post.loc[t_origin])
+    audit_post = res_post["run_metadata"]["macro_event_audit"]["fold_breakdown"][0]
+    assert audit_post["post_close_events"] >= 1
+
+    # Case B: Pre-close release at 12:30 UTC (8:30 AM ET - before market close)
+    ts_pre_close = pd.Timestamp(f"{t_origin.date()} 12:30:00", tz="UTC")
+    macro_pre_close = pd.DataFrame(macro_rows + [{
+        "date": t_origin,
+        "timestamp": ts_pre_close,
+        "indicator": "CPI",
+        "surprise_ann": 2.0,
+    }])
+    h_pre = WalkForwardHarness(yield_df, factor_df, macro_pre_close, cfg)
+    res_pre = h_pre.run_walk_forward_evaluation(max_folds=1)
+    pos_pre = res_pre["backtest_results"]["DNS_Kalman_Macro"].positions
+
+    # Pre-close release DOES affect date t_origin position!
+    assert not pos_base.loc[t_origin].equals(pos_pre.loc[t_origin]), (
+        "Pre-close announcement must affect the position established on date t"
+    )
+
+
+def test_zero_surprise_and_inadequate_history_handling():
+    """
+    Handle zero surprises and inadequate coefficient history without calling them absent releases.
+    """
+    dates = _make_daily_dates("2024-01-02", 30)
+    tenors = ["DGS3MO", "DGS1", "DGS2", "DGS5", "DGS10", "DGS30"]
+    yield_data = {t: [4.0 + 0.1 * i] * len(dates) for i, t in enumerate(tenors)}
+    yield_df = pd.DataFrame(yield_data, index=dates)
+
+    factor_df = pd.DataFrame({
+        "level": 4.5 + np.sin(np.arange(len(dates)) / 5.0) * 0.1,
+        "slope": -0.5 + np.cos(np.arange(len(dates)) / 5.0) * 0.1,
+        "curvature": 0.2 + np.sin(np.arange(len(dates)) / 3.0) * 0.05,
+    }, index=dates)
+
+    # 10 training events for CPI
+    macro_rows = [{"date": dates[2*i], "indicator": "CPI", "surprise_ann": 1.0 if i%2==0 else -1.0} for i in range(10)]
+    
+    # Add 2 events in test window on dates[20]:
+    # 1. CPI release with surprise_ann = 0.0 (zero surprise release)
+    # 2. RARE_INDICATOR release with surprise_ann = 1.0 (inadequate training history, <8 events)
+    macro_rows.append({"date": dates[20], "indicator": "CPI", "surprise_ann": 0.0})
+    macro_rows.append({"date": dates[20], "indicator": "RARE_INDICATOR", "surprise_ann": 1.0})
+
+    cfg = WalkForwardConfig(train_window_days=20, refit_frequency_days=5)
+    harness = WalkForwardHarness(yield_df, factor_df, pd.DataFrame(macro_rows), cfg)
+    res = harness.run_walk_forward_evaluation(max_folds=1)
+
+    audit = res["run_metadata"]["macro_event_audit"]["fold_breakdown"][0]
+    assert audit["evaluated_decision_events"] == 2
+    assert audit["zero_surprise_events"] == 1, "CPI with 0.0 surprise must be tracked as zero_surprise_event"
+    assert audit["inadequate_history_events"] == 1, "RARE_INDICATOR must be tracked as inadequate_history_event"
+    
+    # Status should reflect that events occurred but overlay remained zero
+    assert res["run_metadata"]["macro_event_audit"]["strategy_overlay_status"] == (
+        "INACTIVE_ZERO_SURPRISE_OR_INADEQUATE_HISTORY"
+    )

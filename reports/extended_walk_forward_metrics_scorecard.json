@@ -1,6 +1,12 @@
 {
   "metadata": {
-    "git_commit": "7f1022cbbe7ce1917e3c20fc8b17d47018436a61",
+    "git_commit": "a4d6f3493310472ddf37c1fa3e38c40392745d51-dirty",
+    "git_provenance": {
+      "commit": "a4d6f3493310472ddf37c1fa3e38c40392745d51",
+      "is_dirty": true,
+      "commit_or_dirty": "a4d6f3493310472ddf37c1fa3e38c40392745d51-dirty",
+      "dirty_tree_hash": "613ea9dcbab97f85"
+    },
     "data_checksums": {
       "yield_panel": "6c5f1abbb87b7697",
       "factor_panel": "fa37ee083dfe77ca",
@@ -46,23 +52,34 @@
           "INVALIDATED": 0
         },
         "reasons": [],
-        "rmse": 0.1282893883126024
+        "rmse": 0.1282893883126024,
+        "curve_provenance": "DIRECT_MODEL_FORECAST",
+        "macro_overlay_status": "N/A",
+        "macro_overlay_counts": {}
       },
       "DNS_Kalman_Macro": {
         "model_id": "DNS_Kalman_Macro",
         "status": "NOT_EVALUATED (NO_TEST_RELEASES)",
-        "total_records": 627,
+        "total_records": 684,
         "counts": {
           "GENERATED": 0,
-          "SCORED": 627,
+          "SCORED": 684,
           "UNAVAILABLE": 0,
           "FAILED": 0,
           "INVALIDATED": 0
         },
         "reasons": [
+          "NO_RELEASES",
           "COPIED_DNS_CURVE_FORECAST"
         ],
-        "rmse": 0.1282893883126024
+        "rmse": 0.1282893883126024,
+        "curve_provenance": "COPIED_DNS_CURVE_FORECAST",
+        "macro_overlay_status": "INACTIVE_NO_RELEASES",
+        "macro_overlay_counts": {
+          "active_overlay": 0,
+          "zero_overlay_event": 0,
+          "no_releases": 57
+        }
       },
       "GBM": {
         "model_id": "GBM",
@@ -76,7 +93,10 @@
           "INVALIDATED": 0
         },
         "reasons": [],
-        "rmse": 0.13593680913634845
+        "rmse": 0.13593680913634845,
+        "curve_provenance": "DIRECT_MODEL_FORECAST",
+        "macro_overlay_status": "N/A",
+        "macro_overlay_counts": {}
       },
       "PCA_VAR": {
         "model_id": "PCA_VAR",
@@ -90,7 +110,10 @@
           "INVALIDATED": 0
         },
         "reasons": [],
-        "rmse": 0.05136587242509364
+        "rmse": 0.05136587242509364,
+        "curve_provenance": "DIRECT_MODEL_FORECAST",
+        "macro_overlay_status": "N/A",
+        "macro_overlay_counts": {}
       },
       "Random_Walk": {
         "model_id": "Random_Walk",
@@ -104,7 +127,10 @@
           "INVALIDATED": 0
         },
         "reasons": [],
-        "rmse": 0.0404953381056815
+        "rmse": 0.0404953381056815,
+        "curve_provenance": "DIRECT_MODEL_FORECAST",
+        "macro_overlay_status": "N/A",
+        "macro_overlay_counts": {}
       },
       "Static_NS": {
         "model_id": "Static_NS",
@@ -118,13 +144,26 @@
           "INVALIDATED": 0
         },
         "reasons": [],
-        "rmse": 0.12751465674337545
+        "rmse": 0.12751465674337545,
+        "curve_provenance": "DIRECT_MODEL_FORECAST",
+        "macro_overlay_status": "N/A",
+        "macro_overlay_counts": {}
       }
     },
     "macro_event_audit": {
       "total_training_events": 301,
+      "total_calendar_events": 0,
       "total_test_events": 0,
+      "total_evaluated_decision_events": 0,
+      "total_timestamp_available_events": 0,
+      "total_post_close_events": 0,
+      "total_usable_surprise_events": 0,
+      "total_zero_surprise_events": 0,
+      "total_eligible_coefficient_events": 0,
+      "total_inadequate_history_events": 0,
       "nonzero_macro_days": 0,
+      "curve_forecast_provenance": "COPIED_DNS_CURVE_FORECAST",
+      "strategy_overlay_status": "INACTIVE_ZERO_RELEASES",
       "evaluation_status": "NOT_EVALUATED (NO_TEST_RELEASES)",
       "fold_breakdown": [
         {
@@ -132,8 +171,18 @@
           "train_cutoff": "2026-06-26",
           "test_start": "2026-06-29",
           "test_end": "2026-08-26",
+          "first_origin": "2026-06-26",
+          "last_origin": "2026-08-25",
           "training_event_count": 155,
+          "calendar_event_count": 0,
           "test_event_count": 0,
+          "evaluated_decision_events": 0,
+          "timestamp_available_events": 0,
+          "post_close_events": 0,
+          "usable_surprise_events": 0,
+          "zero_surprise_events": 0,
+          "eligible_coefficient_events": 0,
+          "inadequate_history_events": 0,
           "nonzero_macro_days": 0
         },
         {
@@ -141,14 +190,26 @@
           "train_cutoff": "2026-08-26",
           "test_start": "2026-08-27",
           "test_end": "2026-09-17",
+          "first_origin": "2026-08-26",
+          "last_origin": "2026-09-16",
           "training_event_count": 146,
+          "calendar_event_count": 0,
           "test_event_count": 0,
+          "evaluated_decision_events": 0,
+          "timestamp_available_events": 0,
+          "post_close_events": 0,
+          "usable_surprise_events": 0,
+          "zero_surprise_events": 0,
+          "eligible_coefficient_events": 0,
+          "inadequate_history_events": 0,
           "nonzero_macro_days": 0
         }
       ]
     },
     "econometric_diagnostics": {
       "ns_contemporaneous_fit_rmse_bp": 12.03,
+      "factor_coordinate_rmse_ar1_bp": 8.89,
+      "factor_coordinate_rmse_random_walk_bp": 8.67,
       "factor_rmse_ar1_bp": 8.89,
       "factor_rmse_random_walk_bp": 8.67,
       "observable_2s10s_spread_decomposition": {
@@ -158,6 +219,7 @@
         "factor_dynamics_spread_mse_bp2": 8.9,
         "cross_sectional_fit_spread_rmse_bp": 28.46,
         "cross_sectional_fit_spread_mse_bp2": 810.21,
+        "uncentered_cross_moment_bp2": 11.28,
         "cross_term_cov_bp2": 11.28,
         "sum_components_mse_bp2": 830.39,
         "identity_holds": true
@@ -167,9 +229,31 @@
         "PCA_VAR": 47.37,
         "Static_NS": 100.0,
         "DNS_Kalman": 100.0,
-        "DNS_Kalman_Macro": 100.0,
+        "DNS_Kalman_Macro": 0.0,
         "GBM": 100.0,
+        "DNS_Scaled_60": 0.0,
+        "Static_NS_Residual_Preserving": 0.0,
+        "DNS_Kalman_Residual_Preserving": 0.0
+      },
+      "inherited_dns_clipping_pct": {
+        "Random_Walk": 0.0,
+        "PCA_VAR": 0.0,
+        "Static_NS": 0.0,
+        "DNS_Kalman": 0.0,
+        "DNS_Kalman_Macro": 100.0,
+        "GBM": 0.0,
         "DNS_Scaled_60": 100.0,
+        "Static_NS_Residual_Preserving": 0.0,
+        "DNS_Kalman_Residual_Preserving": 0.0
+      },
+      "additional_clipping_frequency_pct": {
+        "Random_Walk": 0.0,
+        "PCA_VAR": 47.37,
+        "Static_NS": 100.0,
+        "DNS_Kalman": 100.0,
+        "DNS_Kalman_Macro": 0.0,
+        "GBM": 100.0,
+        "DNS_Scaled_60": 0.0,
         "Static_NS_Residual_Preserving": 0.0,
         "DNS_Kalman_Residual_Preserving": 0.0
       },
@@ -178,9 +262,9 @@
         "PCA_VAR": 47.37,
         "Static_NS": 100.0,
         "DNS_Kalman": 100.0,
-        "DNS_Kalman_Macro": 100.0,
+        "DNS_Kalman_Macro": 0.0,
         "GBM": 100.0,
-        "DNS_Scaled_60": 100.0,
+        "DNS_Scaled_60": 0.0,
         "Static_NS_Residual_Preserving": 0.0,
         "DNS_Kalman_Residual_Preserving": 0.0
       },
@@ -189,7 +273,18 @@
         "PCA_VAR": 47.37,
         "Static_NS": 100.0,
         "DNS_Kalman": 100.0,
-        "DNS_Kalman_Macro": 100.0,
+        "DNS_Kalman_Macro": 0.0,
+        "GBM": 100.0,
+        "DNS_Scaled_60": 0.0,
+        "Static_NS_Residual_Preserving": 0.0,
+        "DNS_Kalman_Residual_Preserving": 0.0
+      },
+      "final_position_saturation_pct": {
+        "Random_Walk": 0.0,
+        "PCA_VAR": 47.37,
+        "Static_NS": 100.0,
+        "DNS_Kalman": 100.0,
+        "DNS_Kalman_Macro": 0.0,
         "GBM": 100.0,
         "DNS_Scaled_60": 100.0,
         "Static_NS_Residual_Preserving": 0.0,
@@ -200,9 +295,9 @@
         "PCA_VAR": 0.948,
         "Static_NS": 7.834,
         "DNS_Kalman": 8.139,
-        "DNS_Kalman_Macro": 4.883,
+        "DNS_Kalman_Macro": 0.6,
         "GBM": 5.668,
-        "DNS_Scaled_60": 4.883,
+        "DNS_Scaled_60": 0.6,
         "Static_NS_Residual_Preserving": 0.032,
         "DNS_Kalman_Residual_Preserving": 0.027
       },

@@ -271,12 +271,44 @@ class ForecastLedger:
             }
 
         counts = {s.value: sum(1 for r in matching if r.status == s) for s in ForecastStatus}
-        rmse = self.compute_rmse(model_id)
+        rmse = self.compute_rmse(model_id, target_type="yield_curve")
+        if np.isnan(rmse):
+            rmse = self.compute_rmse(model_id)
+
+        curve_records = [r for r in matching if r.target_type == "yield_curve"]
+        overlay_records = [r for r in matching if r.target_type == "macro_position_overlay"]
+
+        curve_provenance = (
+            "COPIED_DNS_CURVE_FORECAST"
+            if curve_records and all(r.reason == "COPIED_DNS_CURVE_FORECAST" for r in curve_records)
+            else "DIRECT_MODEL_FORECAST"
+        )
+
+        overlay_status = "N/A"
+        if overlay_records:
+            act_cnt = sum(1 for r in overlay_records if r.reason == "ACTIVE_OVERLAY")
+            no_rel_cnt = sum(1 for r in overlay_records if r.reason == "NO_RELEASES")
+            if no_rel_cnt == len(overlay_records):
+                overlay_status = "INACTIVE_NO_RELEASES"
+            elif act_cnt > 0:
+                overlay_status = "ACTIVE_OVERLAY"
+            else:
+                overlay_status = "INACTIVE_ZERO_SURPRISE_OR_INADEQUATE_HISTORY"
 
         # Determine primary status
         if counts[ForecastStatus.SCORED.value] > 0 and counts[ForecastStatus.UNAVAILABLE.value] == 0:
-            if all(r.reason == "COPIED_DNS_CURVE_FORECAST" for r in matching):
-                status = "NOT_EVALUATED (NO_TEST_RELEASES)"
+            if model_id == "DNS_Kalman_Macro":
+                if overlay_records:
+                    if overlay_status == "INACTIVE_NO_RELEASES":
+                        status = "NOT_EVALUATED (NO_TEST_RELEASES)"
+                    elif overlay_status == "ACTIVE_OVERLAY":
+                        status = "VALID_EVALUATION"
+                    else:
+                        status = "INACTIVE_OVERLAY (ZERO_SURPRISE_OR_INADEQUATE_HISTORY)"
+                elif all(r.reason == "COPIED_DNS_CURVE_FORECAST" for r in matching):
+                    status = "NOT_EVALUATED (NO_TEST_RELEASES)"
+                else:
+                    status = "VALID_EVALUATION"
             else:
                 status = "VALID_EVALUATION"
         elif counts[ForecastStatus.UNAVAILABLE.value] > 0:
@@ -295,11 +327,24 @@ class ForecastLedger:
             "counts": counts,
             "reasons": reasons,
             "rmse": rmse,
+            "curve_provenance": curve_provenance,
+            "macro_overlay_status": overlay_status,
+            "macro_overlay_counts": {
+                "active_overlay": sum(1 for r in overlay_records if r.reason == "ACTIVE_OVERLAY"),
+                "zero_overlay_event": sum(1 for r in overlay_records if r.reason == "ZERO_OVERLAY_EVENT"),
+                "no_releases": sum(1 for r in overlay_records if r.reason == "NO_RELEASES"),
+            } if overlay_records else {},
         }
 
-    def get_records(self) -> List[ForecastRecord]:
-        """Return all forecast records."""
-        return list(self._records)
+    def get_records(self, target_type: Optional[str] = "yield_curve") -> List[ForecastRecord]:
+        """Return forecast records, defaulting to yield curve target records."""
+        if target_type is None:
+            return list(self._records)
+        return [r for r in self._records if r.target_type == target_type]
+
+    def get_overlay_records(self) -> List[ForecastRecord]:
+        """Return macro position overlay records."""
+        return [r for r in self._records if r.target_type == "macro_position_overlay"]
 
     def summary_by_model(self) -> Dict[str, Any]:
         """Return diagnostic coverage and status summary for all models in ledger."""
