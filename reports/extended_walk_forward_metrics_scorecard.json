@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "git_commit": "a4d6f3493310472ddf37c1fa3e38c40392745d51-dirty",
+    "git_commit": "34c17a2aab19fea81f0cf74dc88dc0a17f5e7928",
     "git_provenance": {
-      "commit": "a4d6f3493310472ddf37c1fa3e38c40392745d51",
-      "is_dirty": true,
-      "commit_or_dirty": "a4d6f3493310472ddf37c1fa3e38c40392745d51-dirty",
-      "dirty_tree_hash": "613ea9dcbab97f85"
+      "commit": "34c17a2aab19fea81f0cf74dc88dc0a17f5e7928",
+      "is_dirty": false,
+      "commit_or_dirty": "34c17a2aab19fea81f0cf74dc88dc0a17f5e7928",
+      "dirty_tree_hash": "clean"
     },
     "data_checksums": {
       "yield_panel": "6c5f1abbb87b7697",
