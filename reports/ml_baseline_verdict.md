@@ -1,17 +1,17 @@
 # Milestone 14 Verdict: Machine Learning Baseline & Feature Attribution
 
 **Author**: MacroRates Research Team  
-**Git Commit**: `34c17a2aab19fea81f0cf74dc88dc0a17f5e7928`  
+**Git Commit**: `1b5fb0632717b01a2f151819d5743afb2fa38cf9`  
 **Run Mode**: `QUICK_TWO_FOLD_EVALUATION` (Folds: 2)  
 **Evaluated Sample**: 2026-06-29 to 2026-09-17 (57 trading days)  
 **Backend**: `sklearn` | **Seed**: `42`  
 
 > [!IMPORTANT]
 > **RESEARCH INTEGRITY & CAUSALITY AUDIT DISCLOSURES**:
-> 1. **Macro Data Coverage & Status**: The committed macro dataset (`data/processed/macro_surprises.parquet`) ends on 2026-04-10. During the evaluated test period (2026-06-29 to 2026-09-17), there were **0 calendar test events** and **0 evaluated decision origin events**. Therefore, `DNS + Kalman + Macro` is formally audited and categorized as **`NOT_EVALUATED (NO_TEST_RELEASES)`**. No empirical claims of out-of-sample macro forecasting superiority or trading alpha are supported by this test window.
+> 1. **Macro Data Coverage & Status**: The committed macro dataset (`data/processed/macro_surprises.parquet`) ends on 2026-04-10. During the evaluated test period (2026-06-29 to 2026-09-17), there were **0 calendar test events** and **0 observed decision origin events**. Therefore, `DNS + Kalman + Macro` is formally audited and categorized as **`NOT_EVALUATED (NO_TEST_RELEASES)`**. No empirical claims of out-of-sample macro forecasting superiority or trading alpha are supported by this test window.
 > 2. **60% Exposure Control Finding**: The control model `DNS (60% Exposure Control)` trades an exact linear scaling of the baseline DNS signal ($s_t = 0.60 \times s_{t}^{\text{DNS}}$). In the evaluation, it produced trading results identical to `DNS + Kalman + Macro`, confirming that any historical PnL difference was entirely due to linear risk/exposure downscaling, not macroeconomic information.
 > 3. **Observational vs. Causal Attribution**: TreeSHAP and Gini feature rankings describe statistical feature associations within gradient-boosted decision trees. They are descriptive diagnostics, NOT proof of causal macroeconomic transmission mechanisms.
-> 4. **Econometric Decomposition**: Traditional level-reconstruction models (Static NS, DNS Kalman) exhibit ~28.8 bp 2s10s spread RMSE driven predominantly by cross-sectional curve-fitting errors (~28.5 bp in spread space), which push spread forecasts into extreme values that saturate the $\pm 1.0$ signal clip. The diagnostic residual-preserving formulation ($\hat{y}_{t+1|t}^{\text{res}} = y_t + \Lambda(\hat{\beta}_{t+1|t} - \beta_t)$) eliminates this cross-sectional bias, reducing spread RMSE from 28.82 bp to 2.90 bp and signal clipping from 100% to 0%.
+> 4. **Econometric Decomposition**: Traditional level-reconstruction models (Static NS, DNS Kalman) exhibit ~28.8 bp 2s10s spread RMSE driven predominantly by cross-sectional curve-fitting errors (~28.5 bp in spread space), which push spread forecasts into extreme values that saturate the $\pm 1.0$ signal clip. The diagnostic residual-preserving formulation ($\hat{y}_{t+1|t}^{\text{res}} = y_t + \Lambda(\hat{\beta}_{t+1|t} - \beta_t)$) eliminates this cross-sectional bias, reducing spread RMSE from 28.82 bp to 2.90 bp and signal clipping from 100.0% to 0.0%.
 > 5. **Annualization & Statistics Corrections**: Sharpe and Sortino ratios are annualized with $\sqrt{252}$ strictly on standard deviation ($(\mu \times 252) / (\sigma \times \sqrt{252}) = (\mu \times \sqrt{252}) / \sigma$). Hit rates are computed strictly over active trading days; zero-trading benchmarks (Random Walk, Cash Only) report `N/A`, avoiding false 100% hit rate claims.
 > 6. **Benchmark Discipline**: Random Walk provides the unparameterized zero-increment curve forecasting benchmark. Cash-Only provides an unencumbered capital strategy benchmark. Models are evaluated on common out-of-sample test dates without retroactive tuning or artificial error multipliers.
 
@@ -33,10 +33,16 @@
 | :--- | :---: | :--- |
 | **Total Training Events** | 301 | Macro surprise releases available in training windows |
 | **Calendar Test Window Events** | 0 | Releases occurring within calendar test dates |
-| **Evaluated Decision Origin Events** | 0 | Releases available at evaluated decision origins (orig_dates) |
-| **Timestamp-Available Events** | 0 | Releases verified available prior to market close |
+| **Observed Decision Origin Events** | 0 | Total release events evaluated at decision origins |
+| **Timestamp-Available Events** | 0 | Releases verified available prior to market close (<= 16:00 ET) |
+| ↳ *Verified Timestamp Available* | 0 | Explicit timezone-verified timestamp <= 16:00 ET |
+| ↳ *Legacy Date-Only Assumed* | 0 | Legacy date-only releases without intraday timestamp |
+| **Post-Close Events** | 0 | Releases after 16:00 ET (unavailable for same-day decision) |
+| **Rolled to Next Decision Events** | 0 | After-close releases rolled into subsequent decision origin |
 | **Usable Surprise Events** | 0 | Releases with non-null numeric surprise |
-| **Eligible Coefficient Events** | 0 | Releases with causal response beta estimated from training history |
+| **Eligible Coefficient Events** | 0 | Releases with causal response beta estimated from training history ($N \ge 8$) |
+| **Inadequate History Events** | 0 | Releases where indicator has insufficient training history ($N < 8$) |
+| **Active Overlay Events** | 0 | Releases contributing nonzero macro position overlay |
 | **Nonzero Macro Days in Test** | 0 | Evaluated decision days where macro overlay was non-zero |
 | **Curve Forecast Provenance** | `COPIED_DNS_CURVE_FORECAST` | Independent provenance of yield curve predictions |
 | **Macro Strategy Status** | `INACTIVE_ZERO_RELEASES` | Operational status of macro overlay strategy |
@@ -74,26 +80,26 @@
 
 | Formulation | Static NS Spread RMSE | DNS Kalman Spread RMSE | Impact on Signal Clipping |
 | :--- | :---: | :---: | :---: |
-| **Traditional (Level Reconstruct)** | 28.82 bp | 29.90 bp | 100.0% clipped to $\pm 1.0$ bounds |
-| **Residual-Preserving Diagnostic** | 2.90 bp | 2.90 bp | 0.0% clipped (natural dynamic variation) |
+| **Traditional (Level Reconstruct)** | 28.82 bp | 29.90 bp | 100.0% clipped |
+| **Residual-Preserving Diagnostic** | 2.90 bp | 2.90 bp | 0.0% clipped |
 
 ### Signal Saturation & Clipping Breakdown
 
-| Model | Raw Threshold Exceedance ($\ge 1.0$) (%) | Inherited DNS Clipping (%) | Additional Stage Clipping (%) | Final Position Saturation (%) | Mean Unclipped |Input| |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| `DNS_Kalman` | 100.0% | 0.0% | 100.0% | 100.0% | 8.139 |
-| `DNS_Kalman_Macro` | 0.0% | 100.0% | 0.0% | 0.0% | 0.600 |
-| `DNS_Kalman_Residual_Preserving` | 0.0% | 0.0% | 0.0% | 0.0% | 0.027 |
-| `DNS_Scaled_60` | 0.0% | 100.0% | 0.0% | 100.0% | 0.600 |
-| `GBM` | 100.0% | 0.0% | 100.0% | 100.0% | 5.668 |
-| `PCA_VAR` | 47.4% | 0.0% | 47.4% | 47.4% | 0.948 |
-| `Random_Walk` | 0.0% | 0.0% | 0.0% | 0.0% | 0.000 |
-| `Static_NS` | 100.0% | 0.0% | 100.0% | 100.0% | 7.834 |
-| `Static_NS_Residual_Preserving` | 0.0% | 0.0% | 0.0% | 0.0% | 0.032 |
+| Model | Saturation Bound | Raw Threshold Exceedance ($\ge 1.0$) (%) | Inherited DNS Clipping (%) | Additional Stage Clipping (%) | Final Position Saturation (%) | Mean Unclipped |Input| |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `DNS_Kalman` | ±1.00 | 100.0% | 0.0% | 100.0% | 100.0% | 8.139 |
+| `DNS_Kalman_Macro` | ±1.00 | 0.0% | 100.0% | 0.0% | 0.0% | 0.600 |
+| `DNS_Kalman_Residual_Preserving` | ±1.00 | 0.0% | 0.0% | 0.0% | 0.0% | 0.027 |
+| `DNS_Scaled_60` | ±0.60 | 0.0% | 100.0% | 0.0% | 100.0% | 0.600 |
+| `GBM` | ±1.00 | 100.0% | 0.0% | 100.0% | 100.0% | 5.668 |
+| `PCA_VAR` | ±1.00 | 47.4% | 0.0% | 47.4% | 47.4% | 0.948 |
+| `Random_Walk` | ±1.00 | 0.0% | 0.0% | 0.0% | 0.0% | 0.000 |
+| `Static_NS` | ±1.00 | 100.0% | 0.0% | 100.0% | 100.0% | 7.834 |
+| `Static_NS_Residual_Preserving` | ±1.00 | 0.0% | 0.0% | 0.0% | 0.0% | 0.032 |
 
 *Finding*: Traditional level-reconstruction models saturate the $\pm 1.0$ signal bounds due to cross-sectional curve-fitting bias entering the spread calculation. The residual-preserving formulation eliminates this bias, preserving the natural signal variation without clipping.
 
-*Finding*: The identical trading PnL (-$46,684.38) observed across Static NS, DNS Kalman, and GBM in traditional level reconstruction is explained by 100% signal saturation resulting from cross-sectional curve-fitting error propagation.
+*Finding*: The identical trading PnL ($-46,684.38) observed across traditional level reconstruction models is explained by signal saturation resulting from cross-sectional curve-fitting error propagation.
 
 ---
 
