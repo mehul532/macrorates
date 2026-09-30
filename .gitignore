@@ -31,3 +31,9 @@ data/raw/futures/*.csv
 *.swp
 *.swo
 *.egg-info/
+
+# Build artifacts & type/lint caches
+dist/
+build/
+.mypy_cache/
+.ruff_cache/

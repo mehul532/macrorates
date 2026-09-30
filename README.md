@@ -41,7 +41,7 @@ Treasury yields → term-structure estimation → latent Level/Slope/Curvature �
 ```
 
 > [!NOTE]
-> **RESEARCH INTEGRITY & CAUSAL CONTRACT GOVERNANCE (Prompts 1–6 Complete)**:
+> **Research integrity standards**:
 > 1. **Synthetic CMT/DV01 Proxy vs. Executable Futures**:
 >    The daily backtest engine (`src/strategy/backtest.py`, `src/backtest/walk_forward.py`) implements a **synthetic research proxy** using indicative Constant Maturity Treasury (CMT) closing quotes. CMT yields are published after market close (~4:00–4:30 PM ET) based on bid-side quotes and cannot be executed at same-day closing prices in live markets. Live execution requires the dedicated CME futures execution model.
 > 2. **Formal Forecast Protocol & Invalidation of Legacy Multipliers**:
@@ -152,6 +152,11 @@ macrorates/
 ├── scripts/                     # Utility scripts (GIF demo generator, data fetchers)
 ├── tests/                       # Pytest test suite (smoke tests, gap tests, regressions)
 ├── app.py                       # Interactive Streamlit "Yield Curve Event Explorer"
+├── basis.py                     # Entry point: cash/futures basis & implied repo rate analysis
+├── bayesian_state_space.py      # Entry point: Bayesian & regime-switching Nelson-Siegel estimation
+├── dfm_nowcast.py               # Entry point: dynamic factor model (DFM) macro nowcasting
+├── intraday_response.py         # Entry point: intraday Treasury futures event study & local projections
+├── ml_baseline.py               # Entry point: gradient-boosted factor forecaster & SHAP attribution
 ├── svensson.py                  # Standalone 4-factor Svensson curve model deliverable
 └── pyproject.toml
 ```
@@ -202,26 +207,26 @@ $$\text{Macro Surprise } (S_{\text{ann}} / S_{\text{model}}) \longrightarrow \De
 
 ---
 
-## 8. Research Integrity Architecture & Causal Lockdown (Prompts 1–6)
+## 8. Research integrity standards
 
 MacroRates implements rigorous research integrity standards to eliminate causal leakage, lookahead bias, and false equivalence:
 
-1. **Formal Forecast Contracts & Zero Multipliers (Prompt 1)**:
+1. **Formal Forecast Contracts & Zero Multipliers**:
    - Replaced unprincipled error scaling multipliers (`* 0.95`, `* 0.88`, etc.) with strict `ForecastRecord` and `ForecastLedger` tracking.
    - Unavailable or failed models strictly record `status=UNAVAILABLE` and cannot acquire numeric RMSE.
-2. **True Rolling One-Step Forecasts & Canonical Tenors (Prompt 2)**:
+2. **True Rolling One-Step Forecasts & Canonical Tenors**:
    - Canonical 11-tenor mapping with boundary-safe origin-to-target evaluation ($t \to t+1$).
    - Eliminated full-sample leakage in Kalman filtering and state-space estimation with bounded diagonal VAR(1) transition priors.
-3. **Point-in-Time Macro Surprises & Expanding Betas (Prompt 3)**:
+3. **Point-in-Time Macro Surprises & Expanding Betas**:
    - Separated consensus announcement surprises ($S_{\text{ann}}$) from rolling model innovations ($S_{\text{model}}$).
    - Point-in-time expanding standardization with min-history safety fallbacks; strictly out-of-sample macro beta estimation.
-4. **Causal Machine Learning Factor Forecaster (Prompt 4)**:
+4. **Causal Machine Learning Factor Forecaster**:
    - Gradient-Boosted Model (GBM) with explicit backend selection (`sklearn`, `lightgbm`, `xgboost`).
    - Causal training slices with target maturity cutoff discipline; evaluated against true term structure targets with zero-increment predictor matching the Random Walk benchmark.
-5. **Causal Strategy Accounting & Execution Timing (Prompt 5)**:
+5. **Causal Strategy Accounting & Execution Timing**:
    - Reconciled portfolio signs: steepener signal $\to$ long short-end / short long-end.
    - Continuous daily trade ledger with initial entry costs at $t_0$, exact quarterly roll charges once per contract cycle (eliminating repeated day 20–27 charges), and unbundled cash collateral interest.
-6. **End-to-End Invariance Tests & Auditable Provenance (Prompt 6)**:
+6. **End-to-End Invariance Tests & Auditable Provenance**:
    - Bit-for-bit invariance under future asymmetric tenor and macro perturbations (`tests/test_integrity_e2e.py`).
    - Independent ledger-based scoring reconciliation matching baseline tables.
    - Comprehensive Common-Sample Comparison Table including Random Walk (curve benchmark), AR(1) baseline, PCA/VAR, DNS+Kalman, DNS+Kalman+macro, GBM, and Cash-Only (strategy benchmark).
