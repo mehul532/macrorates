@@ -1,10 +1,10 @@
 {
   "metadata": {
-    "git_commit": "9a7efbe9f8b1f0827f0ec404023480a6ffc7efd9",
+    "git_commit": "60ce350cee4eb9a59afe2b6de7d9e03f6af5da4f",
     "git_provenance": {
-      "commit": "9a7efbe9f8b1f0827f0ec404023480a6ffc7efd9",
+      "commit": "60ce350cee4eb9a59afe2b6de7d9e03f6af5da4f",
       "is_dirty": false,
-      "commit_or_dirty": "9a7efbe9f8b1f0827f0ec404023480a6ffc7efd9",
+      "commit_or_dirty": "60ce350cee4eb9a59afe2b6de7d9e03f6af5da4f",
       "dirty_tree_hash": "clean"
     },
     "data_checksums": {
@@ -69,14 +69,15 @@
           "INVALIDATED": 0
         },
         "reasons": [
-          "NO_RELEASES",
-          "COPIED_DNS_CURVE_FORECAST"
+          "COPIED_DNS_CURVE_FORECAST",
+          "NO_RELEASES"
         ],
         "rmse": 0.1282893883126024,
         "curve_provenance": "COPIED_DNS_CURVE_FORECAST",
         "macro_overlay_status": "INACTIVE_NO_RELEASES",
         "macro_overlay_counts": {
           "active_overlay": 0,
+          "zero_net_overlay": 0,
           "zero_overlay_event": 0,
           "no_releases": 57
         }
