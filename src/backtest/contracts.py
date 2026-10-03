@@ -287,11 +287,14 @@ class ForecastLedger:
         overlay_status = "N/A"
         if overlay_records:
             act_cnt = sum(1 for r in overlay_records if r.reason == "ACTIVE_OVERLAY")
+            zero_net_cnt = sum(1 for r in overlay_records if r.reason == "ZERO_NET_OVERLAY")
             no_rel_cnt = sum(1 for r in overlay_records if r.reason == "NO_RELEASES")
             if no_rel_cnt == len(overlay_records):
                 overlay_status = "INACTIVE_NO_RELEASES"
             elif act_cnt > 0:
                 overlay_status = "ACTIVE_OVERLAY"
+            elif zero_net_cnt > 0:
+                overlay_status = "ZERO_NET_OVERLAY"
             else:
                 overlay_status = "INACTIVE_ZERO_SURPRISE_OR_INADEQUATE_HISTORY"
 
@@ -303,6 +306,8 @@ class ForecastLedger:
                         status = "NOT_EVALUATED (NO_TEST_RELEASES)"
                     elif overlay_status == "ACTIVE_OVERLAY":
                         status = "VALID_EVALUATION"
+                    elif overlay_status == "ZERO_NET_OVERLAY":
+                        status = "VALID_MACRO_TEST (ZERO_NET_OVERLAY)"
                     else:
                         status = "INACTIVE_OVERLAY (ZERO_SURPRISE_OR_INADEQUATE_HISTORY)"
                 elif all(r.reason == "COPIED_DNS_CURVE_FORECAST" for r in matching):
@@ -331,6 +336,7 @@ class ForecastLedger:
             "macro_overlay_status": overlay_status,
             "macro_overlay_counts": {
                 "active_overlay": sum(1 for r in overlay_records if r.reason == "ACTIVE_OVERLAY"),
+                "zero_net_overlay": sum(1 for r in overlay_records if r.reason == "ZERO_NET_OVERLAY"),
                 "zero_overlay_event": sum(1 for r in overlay_records if r.reason == "ZERO_OVERLAY_EVENT"),
                 "no_releases": sum(1 for r in overlay_records if r.reason == "NO_RELEASES"),
             } if overlay_records else {},

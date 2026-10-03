@@ -1276,6 +1276,46 @@ def test_activity_counter_reconciliation_and_simultaneous_cancellation():
     assert len(audit["applied_event_records"]) == 2
     assert all(r["status"] == "ACTIVE_OVERLAY" for r in audit["applied_event_records"])
 
+    # 1. Macro event impulse ledger records for both individually active events
+    ledger = res["forecast_ledger"]
+    impulse_recs = [
+        r for r in ledger.records
+        if r.model_id == "DNS_Kalman_Macro" and r.target_type == "macro_event_impulse"
+    ]
+    assert len(impulse_recs) == 2, f"Expected 2 macro_event_impulse records, got {len(impulse_recs)}"
+    assert all(r.origin_timestamp == t_origin for r in impulse_recs)
+    assert all(r.reason == "ACTIVE_MACRO_IMPULSE" for r in impulse_recs)
+    forecast_vals = sorted([r.forecast for r in impulse_recs])
+    assert forecast_vals[0] < 0.0 and forecast_vals[1] > 0.0, "Expected one negative and one positive impulse"
+
+    # 2. Position overlay record on cancelling date
+    overlay_recs = [
+        r for r in ledger.records
+        if r.model_id == "DNS_Kalman_Macro" and r.target_type == "macro_position_overlay" and r.origin_timestamp == t_origin
+    ]
+    assert len(overlay_recs) == 1
+    assert overlay_recs[0].reason == "ZERO_NET_OVERLAY"
+    assert overlay_recs[0].forecast == 0.0
+
+    # 3. Audit labels and status synchronization across metadata and tables
+    EXPECTED_STATUS = "VALID_MACRO_TEST (ZERO_NET_OVERLAY)"
+    assert res["run_metadata"]["macro_event_audit"]["evaluation_status"] == EXPECTED_STATUS
+    assert res["run_metadata"]["macro_event_audit"]["strategy_overlay_status"] == "ZERO_NET_OVERLAY"
+    assert res["baseline_table"].loc["DNS + Kalman + Macro", "Forecast Status"] == EXPECTED_STATUS
+    assert res["common_sample_table"].loc["DNS + Kalman + Macro", "Forecast Status"] == EXPECTED_STATUS
+    assert res["run_metadata"]["ledger_summary"]["DNS_Kalman_Macro"]["status"] == EXPECTED_STATUS
+    assert res["run_metadata"]["ledger_summary"]["DNS_Kalman_Macro"]["macro_overlay_status"] == "ZERO_NET_OVERLAY"
+
+    # 4. Curve forecast tagging retained as copied DNS
+    curve_recs = [
+        r for r in ledger.records
+        if r.model_id == "DNS_Kalman_Macro" and r.target_type == "yield_curve"
+    ]
+    assert len(curve_recs) > 0
+    assert all(r.reason == "COPIED_DNS_CURVE_FORECAST" for r in curve_recs)
+    assert res["run_metadata"]["macro_event_audit"]["curve_forecast_provenance"] == "COPIED_DNS_CURVE_FORECAST"
+    assert res["run_metadata"]["ledger_summary"]["DNS_Kalman_Macro"]["curve_provenance"] == "COPIED_DNS_CURVE_FORECAST"
+
 
 def _make_base_verdict_inputs():
     """Helper to generate baseline inputs for write_verdict_report unit fixtures."""

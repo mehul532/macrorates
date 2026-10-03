@@ -1005,6 +1005,7 @@ class WalkForwardHarness:
             active_overlay_count = 0
             zero_impact_count = 0
             orig_release_dates = set()
+            orig_active_dates = set()
             fold_applied_event_records = []
 
             for a_ev in assigned_events:
@@ -1089,6 +1090,7 @@ class WalkForwardHarness:
                 if impulse_val != 0.0:
                     active_overlay_count += 1
                     ev_status = "ACTIVE_OVERLAY"
+                    orig_active_dates.add(dt_orig)
                 else:
                     zero_impact_count += 1
                     ev_status = "ZERO_IMPACT"
@@ -1161,6 +1163,8 @@ class WalkForwardHarness:
                 overlay_val = float(macro_scale[k])
                 if overlay_val != 0.0:
                     overlay_reason = "ACTIVE_OVERLAY"
+                elif orig_dt in orig_active_dates:
+                    overlay_reason = "ZERO_NET_OVERLAY"
                 elif orig_dt in orig_release_dates:
                     overlay_reason = "ZERO_OVERLAY_EVENT"
                 else:
@@ -1179,24 +1183,23 @@ class WalkForwardHarness:
                     status=ForecastStatus.SCORED,
                     reason=overlay_reason,
                 ))
-                # 3. For nonzero overlay, record traceable event-level impulse in ledger
-                if overlay_val != 0.0:
-                    for ev_rec in fold_applied_event_records:
-                        if ev_rec["assigned_origin_date"] == str(orig_dt.date()) and ev_rec["status"] == "ACTIVE_OVERLAY":
-                            ledger.add_record(ForecastRecord(
-                                run_id=ledger.run_id,
-                                model_id="DNS_Kalman_Macro",
-                                fold_id=f_idx,
-                                training_cutoff=train_dates[-1],
-                                origin_timestamp=orig_dt,
-                                target_timestamp=tgt_dt,
-                                target_type="macro_event_impulse",
-                                target_name=ev_rec["indicator"],
-                                forecast=ev_rec["impulse"],
-                                actual=None,
-                                status=ForecastStatus.SCORED,
-                                reason="ACTIVE_MACRO_IMPULSE",
-                            ))
+                # 3. For every individually active event, record traceable event-level impulse in ledger
+                for ev_rec in fold_applied_event_records:
+                    if ev_rec["assigned_origin_date"] == str(orig_dt.date()) and ev_rec["status"] == "ACTIVE_OVERLAY":
+                        ledger.add_record(ForecastRecord(
+                            run_id=ledger.run_id,
+                            model_id="DNS_Kalman_Macro",
+                            fold_id=f_idx,
+                            training_cutoff=train_dates[-1],
+                            origin_timestamp=orig_dt,
+                            target_timestamp=tgt_dt,
+                            target_type="macro_event_impulse",
+                            target_name=ev_rec["indicator"],
+                            forecast=ev_rec["impulse"],
+                            actual=None,
+                            status=ForecastStatus.SCORED,
+                            reason="ACTIVE_MACRO_IMPULSE",
+                        ))
 
             # --- MODEL 6: GRADIENT BOOSTED MODEL (GBM) ---
             if hasattr(self, "X_ml") and not self.X_ml.empty:
@@ -1446,15 +1449,23 @@ class WalkForwardHarness:
 
         if total_evaluated_decision_events == 0:
             macro_eval_status = "NOT_EVALUATED (NO_TEST_RELEASES)"
+            strategy_overlay_status = "INACTIVE_ZERO_RELEASES"
+        elif total_active_overlay_events > 0 and total_nonzero_macro_days == 0:
+            macro_eval_status = "VALID_MACRO_TEST (ZERO_NET_OVERLAY)"
+            strategy_overlay_status = "ZERO_NET_OVERLAY"
         elif total_nonzero_macro_days == 0:
             macro_eval_status = "INACTIVE_OVERLAY (ZERO_SURPRISE_OR_INADEQUATE_HISTORY)"
+            strategy_overlay_status = "INACTIVE_ZERO_SURPRISE_OR_INADEQUATE_HISTORY"
         else:
             macro_eval_status = "VALID_MACRO_TEST"
+            strategy_overlay_status = "ACTIVE_OVERLAY"
 
         # Synchronize macro evaluation status across baseline_table, common_sample_table, and ledger
         if "DNS_Kalman_Macro" in all_model_metrics:
             if total_evaluated_decision_events == 0:
                 all_model_metrics["DNS_Kalman_Macro"]["Forecast Status"] = "NOT_EVALUATED (NO_TEST_RELEASES)"
+            elif total_active_overlay_events > 0 and total_nonzero_macro_days == 0:
+                all_model_metrics["DNS_Kalman_Macro"]["Forecast Status"] = "VALID_MACRO_TEST (ZERO_NET_OVERLAY)"
             elif total_nonzero_macro_days == 0:
                 all_model_metrics["DNS_Kalman_Macro"]["Forecast Status"] = "INACTIVE_OVERLAY (ZERO_SURPRISE_OR_INADEQUATE_HISTORY)"
 
@@ -1486,6 +1497,8 @@ class WalkForwardHarness:
             if m == "DNS_Kalman_Macro":
                 if total_evaluated_decision_events == 0:
                     f_status = "NOT_EVALUATED (NO_TEST_RELEASES)"
+                elif total_active_overlay_events > 0 and total_nonzero_macro_days == 0:
+                    f_status = "VALID_MACRO_TEST (ZERO_NET_OVERLAY)"
                 elif total_nonzero_macro_days == 0:
                     f_status = "INACTIVE_OVERLAY (ZERO_SURPRISE_OR_INADEQUATE_HISTORY)"
             elif m == "DNS_Scaled_60":
@@ -1668,9 +1681,7 @@ class WalkForwardHarness:
                 "nonzero_macro_days": total_nonzero_macro_days,
                 "applied_event_records": total_applied_event_records,
                 "curve_forecast_provenance": "COPIED_DNS_CURVE_FORECAST",
-                "strategy_overlay_status": "ACTIVE_OVERLAY" if total_nonzero_macro_days > 0 else (
-                    "INACTIVE_ZERO_RELEASES" if total_evaluated_decision_events == 0 else "INACTIVE_ZERO_SURPRISE_OR_INADEQUATE_HISTORY"
-                ),
+                "strategy_overlay_status": strategy_overlay_status,
                 "evaluation_status": macro_eval_status,
                 "fold_breakdown": fold_macro_audit,
             },
