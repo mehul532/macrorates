@@ -1,7 +1,7 @@
 # Milestone 14 Verdict: Machine Learning Baseline & Feature Attribution
 
 **Author**: MacroRates Research Team  
-**Git Commit**: `1b5fb0632717b01a2f151819d5743afb2fa38cf9`  
+**Git Commit**: `9a7efbe9f8b1f0827f0ec404023480a6ffc7efd9`  
 **Run Mode**: `QUICK_TWO_FOLD_EVALUATION` (Folds: 2)  
 **Evaluated Sample**: 2026-06-29 to 2026-09-17 (57 trading days)  
 **Backend**: `sklearn` | **Seed**: `42`  
@@ -9,9 +9,9 @@
 > [!IMPORTANT]
 > **RESEARCH INTEGRITY & CAUSALITY AUDIT DISCLOSURES**:
 > 1. **Macro Data Coverage & Status**: The committed macro dataset (`data/processed/macro_surprises.parquet`) ends on 2026-04-10. During the evaluated test period (2026-06-29 to 2026-09-17), there were **0 calendar test events** and **0 observed decision origin events**. Therefore, `DNS + Kalman + Macro` is formally audited and categorized as **`NOT_EVALUATED (NO_TEST_RELEASES)`**. No empirical claims of out-of-sample macro forecasting superiority or trading alpha are supported by this test window.
-> 2. **60% Exposure Control Finding**: The control model `DNS (60% Exposure Control)` trades an exact linear scaling of the baseline DNS signal ($s_t = 0.60 \times s_{t}^{\text{DNS}}$). In the evaluation, it produced trading results identical to `DNS + Kalman + Macro`, confirming that any historical PnL difference was entirely due to linear risk/exposure downscaling, not macroeconomic information.
+> 2. **60% Exposure Control Finding**: The control model `DNS (60% Exposure Control)` trades an exact linear scaling of the baseline DNS signal ($s_t = 0.60 \times s_{t}^{\text{DNS}}$). In the evaluation, it produced trading results identical to `DNS + Kalman + Macro` (Net PnL: $-26,942.15), confirming that when macroeconomic releases are inactive or neutral, any historical PnL difference was entirely due to linear risk/exposure downscaling, not macroeconomic information.
 > 3. **Observational vs. Causal Attribution**: TreeSHAP and Gini feature rankings describe statistical feature associations within gradient-boosted decision trees. They are descriptive diagnostics, NOT proof of causal macroeconomic transmission mechanisms.
-> 4. **Econometric Decomposition**: Traditional level-reconstruction models (Static NS, DNS Kalman) exhibit ~28.8 bp 2s10s spread RMSE driven predominantly by cross-sectional curve-fitting errors (~28.5 bp in spread space), which push spread forecasts into extreme values that saturate the $\pm 1.0$ signal clip. The diagnostic residual-preserving formulation ($\hat{y}_{t+1|t}^{\text{res}} = y_t + \Lambda(\hat{\beta}_{t+1|t} - \beta_t)$) eliminates this cross-sectional bias, reducing spread RMSE from 28.82 bp to 2.90 bp and signal clipping from 100.0% to 0.0%.
+> 4. **Econometric Decomposition**: Traditional level-reconstruction models (Static NS, DNS Kalman) exhibit ~28.8 bp 2s10s spread RMSE driven predominantly by cross-sectional curve-fitting errors (~28.5 bp in spread space), which push spread forecasts into extreme values that saturate the $\pm 1.0$ signal clip. The diagnostic residual-preserving formulation ($\hat{y}_{t+1|t}^{\text{res}} = y_t + \Lambda(\hat{\beta}_{t+1|t} - \beta_t)$) addresses this cross-sectional bias, reducing spread RMSE from 28.82 bp to 2.90 bp and signal clipping from 100.0% to 0.0%.
 > 5. **Annualization & Statistics Corrections**: Sharpe and Sortino ratios are annualized with $\sqrt{252}$ strictly on standard deviation ($(\mu \times 252) / (\sigma \times \sqrt{252}) = (\mu \times \sqrt{252}) / \sigma$). Hit rates are computed strictly over active trading days; zero-trading benchmarks (Random Walk, Cash Only) report `N/A`, avoiding false 100% hit rate claims.
 > 6. **Benchmark Discipline**: Random Walk provides the unparameterized zero-increment curve forecasting benchmark. Cash-Only provides an unencumbered capital strategy benchmark. Models are evaluated on common out-of-sample test dates without retroactive tuning or artificial error multipliers.
 
@@ -97,7 +97,7 @@
 | `Static_NS` | ±1.00 | 100.0% | 0.0% | 100.0% | 100.0% | 7.834 |
 | `Static_NS_Residual_Preserving` | ±1.00 | 0.0% | 0.0% | 0.0% | 0.0% | 0.032 |
 
-*Finding*: Traditional level-reconstruction models saturate the $\pm 1.0$ signal bounds due to cross-sectional curve-fitting bias entering the spread calculation. The residual-preserving formulation eliminates this bias, preserving the natural signal variation without clipping.
+*Finding*: Traditional level-reconstruction models saturate the $\pm 1.0$ signal bounds due to cross-sectional curve-fitting bias entering the spread calculation. The residual-preserving formulation eliminates this bias, preserving the natural signal variation without clipping (0.0% clipped).
 
 *Finding*: The identical trading PnL ($-46,684.38) observed across traditional level reconstruction models is explained by signal saturation resulting from cross-sectional curve-fitting error propagation.
 
@@ -105,9 +105,9 @@
 
 ## 4. Feature Attribution Summary
 
-- **Level ($\Delta L_{t+1}$)**: Key features by empirical split impact: `dlevel_1d, dcurvature_1d, dslope_1d`
-- **Slope ($\Delta S_{t+1}$)**: Key features by empirical split impact: `dslope_1d, dlevel_1d, dslope_2d`
-- **Curvature ($\Delta C_{t+1}$)**: Key features by empirical split impact: `dcurvature_1d, dlevel_1d, dlevel_2d`
+- **Level ($\\Delta L_{t+1}$)**: Key features by empirical split impact: `dlevel_1d, dcurvature_1d, dslope_1d`
+- **Slope ($\\Delta S_{t+1}$)**: Key features by empirical split impact: `dslope_1d, dlevel_1d, dslope_2d`
+- **Curvature ($\\Delta C_{t+1}$)**: Key features by empirical split impact: `dcurvature_1d, dlevel_1d, dlevel_2d`
 
 *Attribution Type*: `tree_shap` (Descriptive feature importance ranking within decision trees).
 
