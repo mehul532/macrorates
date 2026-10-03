@@ -887,25 +887,30 @@ def test_supported_indicator_zero_history_counterexample_and_audit_reconciliatio
     res = harness.run_walk_forward_evaluation(max_folds=1)
     audit = res["run_metadata"]["macro_event_audit"]["fold_breakdown"][0]
 
-    # Check NFP classification
-    assert audit["eligible_coefficient_events"] == 1, "Only CPI has >=8 training observations"
-    assert audit["inadequate_history_events"] == 1, "NFP has 0 training observations and must be inadequate history"
+    # Check NFP classification and reconciled counters
     assert audit["post_close_events"] == 1
-    assert audit["missing_surprise_events"] == 1
+    assert audit["rolled_to_next_decision_events"] == 1
     assert audit["timestamp_available_events"] == 3
     assert audit["observed_decision_events"] == 4
+    assert audit["missing_surprise_events"] == 1
+    assert audit["usable_surprise_events"] == 3
+    assert audit["eligible_coefficient_events"] == 2, "Both CPI releases (pre-close and rolled post-close) have >=8 training observations"
+    assert audit["inadequate_history_events"] == 1, "NFP has 0 training observations and must be inadequate history"
+    assert audit["active_overlay_events"] == 2
+    assert audit["zero_impact_events"] == 0
+    assert audit["nonzero_macro_days"] == 2, "Both decision origins receive active CPI overlays"
 
     # Mathematical audit reconciliation identities
-    # 1. observed_decision_events = timestamp_available_events + post_close_events
+    # 1. Observed release-time status identity:
     assert audit["observed_decision_events"] == audit["timestamp_available_events"] + audit["post_close_events"]
 
-    # 2. timestamp_available_events = usable_surprise_events + missing_surprise_events
-    assert audit["timestamp_available_events"] == audit["usable_surprise_events"] + audit["missing_surprise_events"]
+    # 2. Application-time evaluation identity:
+    assert audit["evaluated_decision_events"] == audit["usable_surprise_events"] + audit["missing_surprise_events"]
 
-    # 3. usable_surprise_events = eligible_coefficient_events + inadequate_history_events
+    # 3. Application-time coefficient eligibility identity:
     assert audit["usable_surprise_events"] == audit["eligible_coefficient_events"] + audit["inadequate_history_events"]
 
-    # 4. eligible_coefficient_events = active_overlay_events + zero_impact_events
+    # 4. Application-time overlay activity identity:
     assert audit["eligible_coefficient_events"] == audit["active_overlay_events"] + audit["zero_impact_events"]
 
 
@@ -1051,3 +1056,380 @@ def test_sample_independent_dynamic_verdict_report(tmp_path, monkeypatch):
     assert "-$46,684.38" not in content
     assert "28.82" not in content
     assert "29.90" not in content
+
+
+def test_cross_fold_post_close_roll_regression():
+    """
+    Two-fold cross-fold roll regression using 30 business days from 2024-01-02,
+    train_window_days=20, refit_frequency_days=5, and max_folds=2:
+    
+    1. Within-fold roll:
+       A CPI release at 17:00 NY on 2024-02-01 (dates[22]) leaves dates[22] unchanged
+       and changes 2024-02-02 (dates[23]), with rolled_count=1 in Fold 0.
+    
+    2. Cross-fold roll across fold boundary:
+       Moving the release to 2024-02-02 (dates[23], last origin of Fold 0) at 17:00 NY
+       must leave 2024-02-02 unchanged in Fold 0, and roll to 2024-02-05 (dates[24], first origin of Fold 1),
+       changing the evaluated decision on 2024-02-05!
+    
+    3. Explicit contract-quantity checks:
+       - ForecastLedger contains target_type='macro_event_impulse' record for 2024-02-05
+       - Signal difference between base and injected at 2024-02-05 is nonzero
+       - Signal difference at 2024-02-02 is zero
+    """
+    dates = _make_daily_dates("2024-01-02", 30)
+    tenors = ["DGS3MO", "DGS1", "DGS2", "DGS5", "DGS10", "DGS30"]
+    yield_data = {t: [4.0 + 0.1 * i] * len(dates) for i, t in enumerate(tenors)}
+    yield_df = pd.DataFrame(yield_data, index=dates)
+
+    # Induce responsive slope dynamics correlated with CPI surprises (for causal coefficient estimation)
+    for i in range(10):
+        surp = 1.0 if i % 2 == 0 else -1.0
+        yield_df.loc[dates[2 * i + 1]:, "DGS10"] += 0.10 * surp
+
+    factor_df = pd.DataFrame({
+        "level": 4.5 + np.sin(np.arange(len(dates)) / 5.0) * 0.1,
+        "slope": -0.5 + np.cos(np.arange(len(dates)) / 5.0) * 0.1,
+        "curvature": 0.2 + np.sin(np.arange(len(dates)) / 3.0) * 0.05,
+    }, index=dates)
+
+    # 10 training events to establish causal beta (N >= 8)
+    macro_rows = [{"date": dates[2 * i], "indicator": "CPI", "surprise_ann": 1.0 if i % 2 == 0 else -1.0} for i in range(10)]
+    cfg = WalkForwardConfig(train_window_days=20, refit_frequency_days=5)
+
+    # Base run across 2 folds
+    h_base = WalkForwardHarness(yield_df, factor_df, pd.DataFrame(macro_rows), cfg)
+    res_base = h_base.run_walk_forward_evaluation(max_folds=2)
+    sig_base = pd.concat(res_base["signals"]["DNS_Kalman_Macro"])
+
+    # 1. Within-fold roll: CPI release at 17:00 NY on 2024-02-01 (dates[22])
+    t_thu = dates[22]
+    t_fri = dates[23]
+    t_mon = dates[24]
+    macro_within = pd.DataFrame(macro_rows + [{
+        "date": t_thu,
+        "timestamp": f"{t_thu.date()}T17:00:00-05:00",
+        "indicator": "CPI",
+        "surprise_ann": 1.5,
+    }])
+    h_within = WalkForwardHarness(yield_df, factor_df, macro_within, cfg)
+    res_within = h_within.run_walk_forward_evaluation(max_folds=2)
+    sig_within = pd.concat(res_within["signals"]["DNS_Kalman_Macro"])
+    audit_within_f0 = res_within["run_metadata"]["macro_event_audit"]["fold_breakdown"][0]
+
+    # Verify within-fold roll:
+    assert sig_within.loc[t_thu] == sig_base.loc[t_thu], "Thursday 17:00 NY release cannot affect Thursday position"
+    assert sig_within.loc[t_fri] != sig_base.loc[t_fri], "Thursday 17:00 NY release must affect Friday position"
+    assert audit_within_f0["rolled_to_next_decision_events"] == 1
+
+    # 2. Cross-fold roll: CPI release at 17:00 NY on 2024-02-02 (dates[23] - last origin of Fold 0)
+    macro_cross = pd.DataFrame(macro_rows + [{
+        "date": t_fri,
+        "timestamp": f"{t_fri.date()}T17:00:00-05:00",
+        "indicator": "CPI",
+        "surprise_ann": 1.5,
+    }])
+    h_cross = WalkForwardHarness(yield_df, factor_df, macro_cross, cfg)
+    res_cross = h_cross.run_walk_forward_evaluation(max_folds=2)
+    sig_cross = pd.concat(res_cross["signals"]["DNS_Kalman_Macro"])
+    audit_cross_f0 = res_cross["run_metadata"]["macro_event_audit"]["fold_breakdown"][0]
+    audit_cross_f1 = res_cross["run_metadata"]["macro_event_audit"]["fold_breakdown"][1]
+
+    # Friday 17:00 NY must NOT affect Friday position (Fold 0)
+    assert sig_cross.loc[t_fri] == sig_base.loc[t_fri], "Friday 17:00 NY release cannot affect Friday position"
+    # Friday 17:00 NY rolls into Monday 2024-02-05 (dates[24] - Fold 1 first origin)
+    assert sig_cross.loc[t_mon] != sig_base.loc[t_mon], "Friday 17:00 NY release must roll across folds and affect Monday position"
+    
+    # Audit counters: assigned to Fold 1 as rolled event
+    assert audit_cross_f0["rolled_to_next_decision_events"] == 0
+    assert audit_cross_f1["rolled_to_next_decision_events"] == 1
+    assert audit_cross_f1["active_overlay_events"] == 1
+
+    # Explicit contract-quantity check in ForecastLedger
+    ledger = res_cross["forecast_ledger"]
+    impulse_recs = [
+        r for r in ledger.records
+        if r.target_type == "macro_event_impulse" and str(r.origin_timestamp.date()) == str(t_mon.date())
+    ]
+    assert len(impulse_recs) == 1, "Must find exactly one macro_event_impulse ledger record for Monday decision"
+    assert impulse_recs[0].target_name == "CPI"
+    assert impulse_recs[0].forecast != 0.0
+
+
+def test_weekend_and_holiday_release_roll_handling():
+    """
+    Test weekend (Saturday / Sunday) release handling:
+    An announcement on Saturday (e.g., 2024-02-03) occurs between Fold 0's Friday cutoff
+    and Fold 1's Monday cutoff. It must be assigned to Monday Fold 1 as NON_TRADING_DAY_RELEASE,
+    leaving Fold 0 unchanged and affecting Fold 1.
+    """
+    dates = _make_daily_dates("2024-01-02", 35)
+    tenors = ["DGS3MO", "DGS1", "DGS2", "DGS5", "DGS10", "DGS30"]
+    yield_data = {t: [4.0 + 0.1 * i] * len(dates) for i, t in enumerate(tenors)}
+    yield_df = pd.DataFrame(yield_data, index=dates)
+
+    macro_rows = []
+    for i in range(20):
+        surp = 1.0 if i % 2 == 0 else -1.0
+        yield_df.loc[dates[i + 1]:, "DGS10"] += 0.05 * surp
+        macro_rows.append({"date": dates[i], "indicator": "CPI", "surprise_ann": surp})
+
+    factor_df = pd.DataFrame({
+        "level": 4.5 + np.sin(np.arange(len(dates)) / 5.0) * 0.1,
+        "slope": -0.5 + np.cos(np.arange(len(dates)) / 5.0) * 0.1,
+        "curvature": 0.2 + np.sin(np.arange(len(dates)) / 3.0) * 0.05,
+    }, index=dates)
+
+    cfg = WalkForwardConfig(train_window_days=20, refit_frequency_days=5)
+
+    # Base run
+    h_base = WalkForwardHarness(yield_df, factor_df, pd.DataFrame(macro_rows), cfg)
+    res_base = h_base.run_walk_forward_evaluation(max_folds=2)
+    sig_base = pd.concat(res_base["signals"]["DNS_Kalman_Macro"])
+
+    t_fri = dates[23]  # 2024-02-02
+    t_mon = dates[24]  # 2024-02-05
+    # Saturday release at 10:00 AM NY
+    sat_date = pd.Timestamp("2024-02-03")
+    macro_sat = pd.DataFrame(macro_rows + [{
+        "date": sat_date,
+        "timestamp": "2024-02-03T10:00:00-05:00",
+        "indicator": "CPI",
+        "surprise_ann": 1.5,
+    }])
+
+    h_sat = WalkForwardHarness(yield_df, factor_df, macro_sat, cfg)
+    res_sat = h_sat.run_walk_forward_evaluation(max_folds=2)
+    sig_sat = pd.concat(res_sat["signals"]["DNS_Kalman_Macro"])
+    audit_sat_f0 = res_sat["run_metadata"]["macro_event_audit"]["fold_breakdown"][0]
+    audit_sat_f1 = res_sat["run_metadata"]["macro_event_audit"]["fold_breakdown"][1]
+
+    # Fold 0 Friday must remain unchanged
+    assert sig_sat.loc[t_fri] == sig_base.loc[t_fri]
+    # Fold 1 Monday must be affected
+    assert sig_sat.loc[t_mon] != sig_base.loc[t_mon]
+
+    # Receiving fold audit
+    assert audit_sat_f1["evaluated_decision_events"] == 1
+    assert audit_sat_f1["active_overlay_events"] == 1
+    applied_recs = audit_sat_f1["applied_event_records"]
+    assert len(applied_recs) == 1
+    assert applied_recs[0]["release_status"] == "NON_TRADING_DAY_RELEASE"
+    assert applied_recs[0]["assigned_origin_date"] == str(t_mon.date())
+
+
+def test_activity_counter_reconciliation_and_simultaneous_cancellation():
+    """
+    Test activity counter reconciliation when simultaneous events cancel out:
+    Two simultaneous releases on the same decision origin date with opposite surprises (+1.0 and -1.0)
+    produce canceling impulses:
+      active_overlay_events == 2
+      nonzero_macro_days == 0
+    This strictly confirms the distinction between event counts and decision-day counts.
+    """
+    dates = _make_daily_dates("2024-01-02", 30)
+    tenors = ["DGS3MO", "DGS1", "DGS2", "DGS5", "DGS10", "DGS30"]
+    yield_data = {t: [4.0 + 0.1 * i] * len(dates) for i, t in enumerate(tenors)}
+    yield_df = pd.DataFrame(yield_data, index=dates)
+
+    for i in range(10):
+        surp = 1.0 if i % 2 == 0 else -1.0
+        yield_df.loc[dates[2 * i + 1]:, "DGS10"] += 0.10 * surp
+
+    factor_df = pd.DataFrame({
+        "level": 4.5 + np.sin(np.arange(len(dates)) / 5.0) * 0.1,
+        "slope": -0.5 + np.cos(np.arange(len(dates)) / 5.0) * 0.1,
+        "curvature": 0.2 + np.sin(np.arange(len(dates)) / 3.0) * 0.05,
+    }, index=dates)
+
+    macro_rows = [{"date": dates[2 * i], "indicator": "CPI", "surprise_ann": 1.0 if i % 2 == 0 else -1.0} for i in range(10)]
+    
+    t_origin = dates[20]
+    # Two simultaneous events on t_origin with opposite surprises: +1.0 and -1.0
+    macro_rows.append({
+        "date": t_origin,
+        "timestamp": f"{t_origin.date()}T08:30:00-05:00",
+        "indicator": "CPI",
+        "surprise_ann": 1.0,
+    })
+    macro_rows.append({
+        "date": t_origin,
+        "timestamp": f"{t_origin.date()}T08:30:00-05:00",
+        "indicator": "CPI",
+        "surprise_ann": -1.0,
+    })
+
+    cfg = WalkForwardConfig(train_window_days=20, refit_frequency_days=5)
+    h = WalkForwardHarness(yield_df, factor_df, pd.DataFrame(macro_rows), cfg)
+    res = h.run_walk_forward_evaluation(max_folds=1)
+    audit = res["run_metadata"]["macro_event_audit"]["fold_breakdown"][0]
+
+    # Reconciled activity counters
+    assert audit["evaluated_decision_events"] == 2
+    assert audit["usable_surprise_events"] == 2
+    assert audit["eligible_coefficient_events"] == 2
+    assert audit["active_overlay_events"] == 2, "Both events are individually active overlays"
+    assert audit["zero_impact_events"] == 0
+    assert audit["nonzero_macro_days"] == 0, "Net macro impulse is 0.0 (+1.0 + -1.0 = 0), so nonzero_macro_days must be 0"
+
+    # Both events are recorded in applied_event_records
+    assert len(audit["applied_event_records"]) == 2
+    assert all(r["status"] == "ACTIVE_OVERLAY" for r in audit["applied_event_records"])
+
+
+def _make_base_verdict_inputs():
+    """Helper to generate baseline inputs for write_verdict_report unit fixtures."""
+    models = [
+        "Random Walk (Curve Benchmark)",
+        "AR(1) Baseline (Static NS)",
+        "DNS + Kalman",
+        "Static NS (Residual-Preserving Diagnostic)",
+        "DNS + Kalman (Residual-Preserving Diagnostic)",
+        "DNS (60% Exposure Control)",
+        "DNS + Kalman + Macro",
+        "GBM",
+    ]
+    data = {
+        "2s10s Spread RMSE (bp)": [1.50, 15.20, 14.80, 1.65, 1.60, 14.80, 14.80, np.nan],
+        "Trading Net PnL ($)": [0.0, 12500.0, 12500.0, 14200.0, 14200.0, 7500.0, 7500.0, np.nan],
+        "Annualized Sharpe": [np.nan, 0.85, 0.85, 1.20, 1.22, 0.85, 0.85, np.nan],
+        "Hit Rate (%)": [np.nan, 58.5, 58.5, 62.0, 62.0, 58.5, 58.5, np.nan],
+    }
+    table = pd.DataFrame(data, index=models)
+    ml_eval = {"shap_data": {"type": "tree_shap", "results": {}}}
+    run_meta = {
+        "git_commit": "testcommit1234",
+        "run_mode": "SYNTHETIC_TEST",
+        "fold_count": 5,
+        "eval_start_date": "2023-01-03",
+        "eval_end_date": "2023-08-30",
+        "total_eval_days": 100,
+        "macro_event_audit": {
+            "macro_data_coverage_end": "2024-03-31",
+            "total_calendar_events": 5,
+            "total_observed_decision_events": 5,
+            "evaluation_status": "VALID_MACRO_TEST",
+        },
+        "econometric_diagnostics": {
+            "observable_2s10s_spread_decomposition": {
+                "total_spread_rmse_bp": 15.20,
+                "factor_dynamics_spread_rmse_bp": 1.55,
+                "cross_sectional_fit_spread_rmse_bp": 15.10,
+                "uncentered_cross_moment_bp2": -0.85,
+                "sum_components_mse_bp2": 231.04,
+                "total_spread_mse_bp2": 231.04,
+            },
+            "additional_clipping_frequency_pct": {"Static_NS": 45.0, "Static_NS_Residual_Preserving": 0.0},
+        },
+    }
+    return table, ml_eval, run_meta
+
+
+def test_verdict_report_5pct_residual_clipping(tmp_path, monkeypatch):
+    """
+    Test verdict report with 5% residual clipping:
+    Verify that 5.0% is reported and the statement 'without clipping' is NOT present.
+    """
+    table, ml_eval, run_meta = _make_base_verdict_inputs()
+    run_meta["econometric_diagnostics"]["additional_clipping_frequency_pct"]["Static_NS_Residual_Preserving"] = 5.0
+
+    monkeypatch.chdir(tmp_path)
+    write_verdict_report(table, ml_eval, run_meta)
+
+    verdict_file = tmp_path / "reports" / "ml_baseline_verdict.md"
+    assert verdict_file.exists()
+    content = verdict_file.read_text(encoding="utf-8")
+
+    assert "5.0%" in content
+    assert "without clipping" not in content
+    assert "residual signal clipping frequency of 5.0%" in content
+
+
+def test_verdict_report_worse_residual_rmse(tmp_path, monkeypatch):
+    """
+    Test verdict report when residual-preserving formulation has worse RMSE than traditional:
+    Verify that 'increasing spread RMSE' is stated and 'reducing spread RMSE' is NOT present.
+    """
+    table, ml_eval, run_meta = _make_base_verdict_inputs()
+    # Traditional NS is 15.20, set Residual-Preserving NS to 18.50 (worse)
+    table.loc["Static NS (Residual-Preserving Diagnostic)", "2s10s Spread RMSE (bp)"] = 18.50
+
+    monkeypatch.chdir(tmp_path)
+    write_verdict_report(table, ml_eval, run_meta)
+
+    verdict_file = tmp_path / "reports" / "ml_baseline_verdict.md"
+    assert verdict_file.exists()
+    content = verdict_file.read_text(encoding="utf-8")
+
+    assert "increasing spread RMSE" in content
+    assert "reducing spread RMSE" not in content
+
+
+def test_verdict_report_factor_dominated_error(tmp_path, monkeypatch):
+    """
+    Test verdict report when factor dynamics error dominates cross-sectional fit error:
+    Verify that factor dynamics error is conditionally identified as dominant contributor.
+    """
+    table, ml_eval, run_meta = _make_base_verdict_inputs()
+    decomp = run_meta["econometric_diagnostics"]["observable_2s10s_spread_decomposition"]
+    decomp["factor_dynamics_spread_rmse_bp"] = 12.0
+    decomp["cross_sectional_fit_spread_rmse_bp"] = 3.0
+
+    monkeypatch.chdir(tmp_path)
+    write_verdict_report(table, ml_eval, run_meta)
+
+    verdict_file = tmp_path / "reports" / "ml_baseline_verdict.md"
+    assert verdict_file.exists()
+    content = verdict_file.read_text(encoding="utf-8")
+
+    assert "driven predominantly by factor dynamics errors" in content
+    assert "factor dynamics error is the dominant contributor" in content
+    assert "cross-sectional curve-fitting error is the dominant contributor" not in content
+
+
+def test_verdict_report_active_macro_differs_from_control(tmp_path, monkeypatch):
+    """
+    Test verdict report when active macro model PnL differs from the 60% exposure control:
+    Verify that non-identical PnLs and the net difference are reported rather than claiming identical results.
+    """
+    table, ml_eval, run_meta = _make_base_verdict_inputs()
+    table.loc["DNS (60% Exposure Control)", "Trading Net PnL ($)"] = 7500.0
+    table.loc["DNS + Kalman + Macro", "Trading Net PnL ($)"] = 9500.0
+
+    monkeypatch.chdir(tmp_path)
+    write_verdict_report(table, ml_eval, run_meta)
+
+    verdict_file = tmp_path / "reports" / "ml_baseline_verdict.md"
+    assert verdict_file.exists()
+    content = verdict_file.read_text(encoding="utf-8")
+
+    assert "$7,500.00" in content
+    assert "$9,500.00" in content
+    assert "+$2,000.00" in content
+    assert "identical to `DNS + Kalman + Macro`" not in content
+
+
+def test_verdict_report_missing_diagnostics(tmp_path, monkeypatch):
+    """
+    Test verdict report when econometric diagnostics and macro audit metadata are missing:
+    Verify that the report generates cleanly with N/A placeholders rather than failing or inventing conclusions.
+    """
+    table, ml_eval, _ = _make_base_verdict_inputs()
+    table.loc[:, :] = np.nan
+    run_meta = {
+        "git_commit": "testcommit_empty",
+        "run_mode": "EMPTY_DIAGNOSTICS_TEST",
+    }
+
+    monkeypatch.chdir(tmp_path)
+    write_verdict_report(table, ml_eval, run_meta)
+
+    verdict_file = tmp_path / "reports" / "ml_baseline_verdict.md"
+    assert verdict_file.exists()
+    content = verdict_file.read_text(encoding="utf-8")
+
+    assert "Observable spread error decomposition is unavailable" in content
+    assert "Residual signal clipping diagnostics are unavailable" in content
+    assert "Trading results for DNS control and macro models are not available" in content
+    assert "has unspecified coverage end date" in content
+

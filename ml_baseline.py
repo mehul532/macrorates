@@ -446,6 +446,95 @@ def write_verdict_report(
     else:
         pnl_finding_str = "*Finding*: Trading PnL reflects model-specific signal saturation and risk scaling."
 
+    # Dynamic macro coverage end string
+    macro_cov_end = macro_audit.get("macro_data_coverage_end", "N/A")
+    if macro_cov_end and macro_cov_end != "N/A":
+        cov_end_str = f"ends on {macro_cov_end}"
+    else:
+        cov_end_str = "has unspecified coverage end date"
+
+    # Dynamic 60% exposure control finding
+    ctrl_pnl = get_table_val("DNS (60% Exposure Control)", pnl_col, np.nan)
+    macro_pnl = get_table_val("DNS + Kalman + Macro", pnl_col, np.nan)
+    ctrl_sharpe = get_table_val("DNS (60% Exposure Control)", "Annualized Sharpe", np.nan)
+    macro_sharpe = get_table_val("DNS + Kalman + Macro", "Annualized Sharpe", np.nan)
+
+    if not np.isnan(ctrl_pnl) and not np.isnan(macro_pnl) and np.isclose(ctrl_pnl, macro_pnl, atol=1e-2):
+        control_finding_text = (
+            f"The control model `DNS (60% Exposure Control)` trades an exact linear scaling of the baseline DNS signal "
+            f"($s_t = 0.60 \\times s_{{t}}^{{\\text{{DNS}}}}$). In the evaluation, it produced trading results identical to "
+            f"`DNS + Kalman + Macro` (Net PnL: ${ctrl_pnl:,.2f}), confirming that when macroeconomic releases are inactive "
+            f"or neutral, any historical PnL difference was entirely due to linear risk/exposure downscaling, not macroeconomic information."
+        )
+    elif not np.isnan(ctrl_pnl) and not np.isnan(macro_pnl):
+        pnl_diff = macro_pnl - ctrl_pnl
+        diff_sign_str = f"+${abs(pnl_diff):,.2f}" if pnl_diff >= 0 else f"-${abs(pnl_diff):,.2f}"
+        control_finding_text = (
+            f"The control model `DNS (60% Exposure Control)` produced a Net PnL of ${ctrl_pnl:,.2f} "
+            f"(Sharpe: {fmt_num(ctrl_sharpe, 2)}), while `DNS + Kalman + Macro` produced a Net PnL of ${macro_pnl:,.2f} "
+            f"(Sharpe: {fmt_num(macro_sharpe, 2)}), reflecting an active macroeconomic position overlay difference of "
+            f"{diff_sign_str}."
+        )
+    else:
+        control_finding_text = (
+            "Trading results for DNS control and macro models are not available."
+        )
+
+    # Dynamic econometric decomposition prose
+    if not np.isnan(trad_ns_spread_rmse) and not np.isnan(res_ns_spread_rmse):
+        if res_ns_spread_rmse < trad_ns_spread_rmse:
+            rmse_impact_str = f"reducing spread RMSE from {trad_ns_rmse_str2} to {res_ns_rmse_str2} {clip_red_text}"
+        elif res_ns_spread_rmse > trad_ns_spread_rmse:
+            rmse_impact_str = f"increasing spread RMSE from {trad_ns_rmse_str2} to {res_ns_rmse_str2} {clip_red_text}"
+        else:
+            rmse_impact_str = f"leaving spread RMSE unchanged at {trad_ns_rmse_str2} {clip_red_text}"
+    else:
+        rmse_impact_str = "spread RMSE comparison is unavailable"
+
+    if not np.isnan(fit_spread_rmse) and not np.isnan(fac_dynamics_rmse):
+        if fit_spread_rmse > fac_dynamics_rmse:
+            predom_err_str = f"driven predominantly by cross-sectional curve-fitting errors (~{fit_spread_rmse_str} bp in spread space)"
+        elif fac_dynamics_rmse > fit_spread_rmse:
+            predom_err_str = f"driven predominantly by factor dynamics errors (~{fmt_num(fac_dynamics_rmse, 1)} bp in spread space)"
+        else:
+            predom_err_str = f"with curve-fitting and factor errors contributing equally (~{fit_spread_rmse_str} bp)"
+    elif not np.isnan(fit_spread_rmse):
+        predom_err_str = f"with cross-sectional curve-fitting errors at ~{fit_spread_rmse_str} bp in spread space"
+    else:
+        predom_err_str = "with error decomposition unavailable"
+
+    # Dynamic decomposition dominant note
+    if not np.isnan(fit_spread_rmse) and not np.isnan(fac_dynamics_rmse):
+        if fit_spread_rmse > fac_dynamics_rmse:
+            dominant_str = (
+                f"while cross-sectional curve-fitting error is the dominant contributor ({fmt_bp(fit_spread_rmse)}), "
+                f"demonstrating that spread forecast failure is driven predominantly by static parametric fitting error, not factor dynamics."
+            )
+        elif fac_dynamics_rmse > fit_spread_rmse:
+            dominant_str = (
+                f"while factor dynamics error is the dominant contributor ({fmt_bp(fac_dynamics_rmse)}), "
+                f"demonstrating that spread forecast failure is driven predominantly by factor dynamics, not static curve-fitting error."
+            )
+        else:
+            dominant_str = (
+                f"with factor dynamics and curve-fitting errors contributing equally ({fmt_bp(fit_spread_rmse)})."
+            )
+        decomp_note_md = (
+            f"*Note*: As proven above, factor dynamics contribute {fmt_bp(fac_dynamics_rmse)} of spread error "
+            f"(comparable to Random Walk's {fmt_bp(rw_spread_rmse)}), {dominant_str}"
+        )
+    else:
+        decomp_note_md = "*Note*: Observable spread error decomposition is unavailable for this evaluation."
+
+    # Dynamic residual clipping prose
+    if not np.isnan(res_ns_clip):
+        if res_ns_clip == 0.0:
+            clip_finding_str = "The residual-preserving formulation eliminates this bias, preserving the natural signal variation without clipping (0.0% clipped)."
+        else:
+            clip_finding_str = f"The residual-preserving formulation reduces this bias, resulting in a residual signal clipping frequency of {res_ns_clip:.1f}%."
+    else:
+        clip_finding_str = "Residual signal clipping diagnostics are unavailable."
+
     content = f"""# Milestone 14 Verdict: Machine Learning Baseline & Feature Attribution
 
 **Author**: MacroRates Research Team  
@@ -456,10 +545,10 @@ def write_verdict_report(
 
 > [!IMPORTANT]
 > **RESEARCH INTEGRITY & CAUSALITY AUDIT DISCLOSURES**:
-> 1. **Macro Data Coverage & Status**: The committed macro dataset (`data/processed/macro_surprises.parquet`) ends on 2026-04-10. During the evaluated test period ({eval_start} to {eval_end}), there were **{macro_audit.get('total_calendar_events', macro_audit.get('total_test_events', 0))} calendar test events** and **{macro_audit.get('total_observed_decision_events', macro_audit.get('total_evaluated_decision_events', 0))} observed decision origin events**. Therefore, `DNS + Kalman + Macro` is formally audited and categorized as **`{macro_audit.get('evaluation_status', 'NOT_EVALUATED')}`**. No empirical claims of out-of-sample macro forecasting superiority or trading alpha are supported by this test window.
-> 2. **60% Exposure Control Finding**: The control model `DNS (60% Exposure Control)` trades an exact linear scaling of the baseline DNS signal ($s_t = 0.60 \\times s_{{t}}^{{\\text{{DNS}}}}$). In the evaluation, it produced trading results identical to `DNS + Kalman + Macro`, confirming that any historical PnL difference was entirely due to linear risk/exposure downscaling, not macroeconomic information.
+> 1. **Macro Data Coverage & Status**: The committed macro dataset (`data/processed/macro_surprises.parquet`) {cov_end_str}. During the evaluated test period ({eval_start} to {eval_end}), there were **{macro_audit.get('total_calendar_events', macro_audit.get('total_test_events', 0))} calendar test events** and **{macro_audit.get('total_observed_decision_events', macro_audit.get('total_evaluated_decision_events', 0))} observed decision origin events**. Therefore, `DNS + Kalman + Macro` is formally audited and categorized as **`{macro_audit.get('evaluation_status', 'NOT_EVALUATED')}`**. No empirical claims of out-of-sample macro forecasting superiority or trading alpha are supported by this test window.
+> 2. **60% Exposure Control Finding**: {control_finding_text}
 > 3. **Observational vs. Causal Attribution**: TreeSHAP and Gini feature rankings describe statistical feature associations within gradient-boosted decision trees. They are descriptive diagnostics, NOT proof of causal macroeconomic transmission mechanisms.
-> 4. **Econometric Decomposition**: Traditional level-reconstruction models (Static NS, DNS Kalman) exhibit ~{trad_ns_rmse_str} bp 2s10s spread RMSE driven predominantly by cross-sectional curve-fitting errors (~{fit_spread_rmse_str} bp in spread space), which push spread forecasts into extreme values that saturate the $\\pm 1.0$ signal clip. The diagnostic residual-preserving formulation ($\\hat{{y}}_{{t+1|t}}^{{\\text{{res}}}} = y_t + \\Lambda(\\hat{{\\beta}}_{{t+1|t}} - \\beta_t)$) eliminates this cross-sectional bias, reducing spread RMSE from {trad_ns_rmse_str2} to {res_ns_rmse_str2} {clip_red_text}.
+> 4. **Econometric Decomposition**: Traditional level-reconstruction models (Static NS, DNS Kalman) exhibit ~{trad_ns_rmse_str} bp 2s10s spread RMSE {predom_err_str}, which push spread forecasts into extreme values that saturate the $\\pm 1.0$ signal clip. The diagnostic residual-preserving formulation ($\\hat{{y}}_{{t+1|t}}^{{\\text{{res}}}} = y_t + \\Lambda(\\hat{{\\beta}}_{{t+1|t}} - \\beta_t)$) addresses this cross-sectional bias, {rmse_impact_str}.
 > 5. **Annualization & Statistics Corrections**: Sharpe and Sortino ratios are annualized with $\\sqrt{{252}}$ strictly on standard deviation ($(\\mu \\times 252) / (\\sigma \\times \\sqrt{{252}}) = (\\mu \\times \\sqrt{{252}}) / \\sigma$). Hit rates are computed strictly over active trading days; zero-trading benchmarks (Random Walk, Cash Only) report `N/A`, avoiding false 100% hit rate claims.
 > 6. **Benchmark Discipline**: Random Walk provides the unparameterized zero-increment curve forecasting benchmark. Cash-Only provides an unencumbered capital strategy benchmark. Models are evaluated on common out-of-sample test dates without retroactive tuning or artificial error multipliers.
 
@@ -507,7 +596,7 @@ def write_verdict_report(
 
 {decomp_table_md}
 
-*Note*: As proven above, factor dynamics contribute {fmt_bp(fac_dynamics_rmse)} of spread error (comparable to Random Walk's {fmt_bp(rw_spread_rmse)}), while cross-sectional curve-fitting error is the dominant contributor ({fmt_bp(fit_spread_rmse)}), demonstrating that spread forecast failure is driven predominantly by static parametric fitting error, not factor dynamics.
+{decomp_note_md}
 
 ### Factor Dynamics Diagnostics (Factor-Coordinate Space)
 *These diagnostics evaluate state variable forecasting in factor-coordinate space, distinct from observable 2s10s spread error decomposition:*
@@ -529,7 +618,7 @@ def write_verdict_report(
 
 {clipping_table_md}
 
-*Finding*: Traditional level-reconstruction models saturate the $\\pm 1.0$ signal bounds due to cross-sectional curve-fitting bias entering the spread calculation. The residual-preserving formulation eliminates this bias, preserving the natural signal variation without clipping.
+*Finding*: Traditional level-reconstruction models saturate the $\\pm 1.0$ signal bounds due to cross-sectional curve-fitting bias entering the spread calculation. {clip_finding_str}
 
 {pnl_finding_str}
 
@@ -537,9 +626,9 @@ def write_verdict_report(
 
 ## 4. Feature Attribution Summary
 
-- **Level ($\Delta L_{{t+1}}$)**: Key features by empirical split impact: `{top_lvl}`
-- **Slope ($\Delta S_{{t+1}}$)**: Key features by empirical split impact: `{top_slp}`
-- **Curvature ($\Delta C_{{t+1}}$)**: Key features by empirical split impact: `{top_cur}`
+- **Level ($\\\\Delta L_{{t+1}}$)**: Key features by empirical split impact: `{top_lvl}`
+- **Slope ($\\\\Delta S_{{t+1}}$)**: Key features by empirical split impact: `{top_slp}`
+- **Curvature ($\\\\Delta C_{{t+1}}$)**: Key features by empirical split impact: `{top_cur}`
 
 *Attribution Type*: `{stype}` (Descriptive feature importance ranking within decision trees).
 

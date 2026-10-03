@@ -467,6 +467,136 @@ class WalkForwardHarness:
         spread_decomp_factor_sq = []
         spread_decomp_fit_sq = []
         spread_decomp_cross = []
+
+        # Construct unified evaluated decision calendar across all evaluated folds
+        full_decision_calendar = []
+        for f_idx_cal, (tr_dates_cal, te_dates_cal) in enumerate(folds):
+            pairs_cal = [(tr_dates_cal[-1], te_dates_cal[0])] + [
+                (te_dates_cal[i], te_dates_cal[i + 1]) for i in range(len(te_dates_cal) - 1)
+            ]
+            for k_cal, (o_dt, t_dt) in enumerate(pairs_cal):
+                dt_d = pd.to_datetime(o_dt).date()
+                c_nyc = pd.Timestamp(f"{dt_d} 16:00:00", tz="America/New_York")
+                full_decision_calendar.append({
+                    "decision_index": len(full_decision_calendar),
+                    "fold_id": f_idx_cal,
+                    "fold_k_idx": k_cal,
+                    "origin_timestamp": o_dt,
+                    "target_timestamp": t_dt,
+                    "cutoff_nyc": c_nyc,
+                })
+
+        first_orig_dt = full_decision_calendar[0]["origin_timestamp"] if full_decision_calendar else None
+        if first_orig_dt is not None and first_orig_dt in self.common_dates:
+            first_idx = self.common_dates.get_loc(first_orig_dt)
+            if first_idx > 0:
+                prior_dt = self.common_dates[first_idx - 1]
+                prior_cutoff_nyc = pd.Timestamp(f"{pd.to_datetime(prior_dt).date()} 16:00:00", tz="America/New_York")
+            else:
+                prior_cutoff_nyc = pd.Timestamp.min.tz_localize("America/New_York")
+        else:
+            prior_cutoff_nyc = pd.Timestamp.min.tz_localize("America/New_York")
+
+        # Map releases from self.macro_df across the full evaluated decision calendar
+        fold_assigned_macro_events = {f_i: [] for f_i in range(len(folds))}
+        events_with_no_subsequent_decision = []
+        unassigned_invalid_timestamp_events = []
+        macro_coverage_end_str = "N/A"
+
+        if self.macro_df is not None and not self.macro_df.empty and "date" in self.macro_df.columns:
+            try:
+                macro_coverage_end_str = str(pd.to_datetime(self.macro_df["date"]).max().date())
+            except Exception:
+                macro_coverage_end_str = "N/A"
+
+            for ev_idx, m_row in self.macro_df.iterrows():
+                ev_dt = m_row["date"]
+                ind = m_row.get("indicator")
+                surp = m_row.get("surprise_ann", m_row.get("surprise", np.nan))
+
+                avail_audit = parse_macro_timestamp_availability(m_row, ev_dt)
+                if avail_audit.status == MacroTimestampAudit.INVALID_TIMESTAMP_REJECTED:
+                    unassigned_invalid_timestamp_events.append({
+                        "event_row": ev_idx,
+                        "indicator": ind,
+                        "date": ev_dt,
+                        "reason": avail_audit.reason,
+                    })
+                    continue
+
+                # Determine normalized release timestamp in America/New_York
+                if avail_audit.release_dt_nyc is not None:
+                    t_rel = avail_audit.release_dt_nyc
+                else:
+                    ev_date_obj = pd.to_datetime(ev_dt).date()
+                    t_rel = pd.Timestamp(f"{ev_date_obj} 08:30:00", tz="America/New_York")
+
+                # Events occurring on or before prior_cutoff_nyc belong to initial training history
+                if t_rel <= prior_cutoff_nyc:
+                    continue
+
+                # Find the FIRST decision whose cutoff admits the release timestamp
+                assigned_dec = None
+                for dec in full_decision_calendar:
+                    if t_rel <= dec["cutoff_nyc"]:
+                        assigned_dec = dec
+                        break
+
+                if assigned_dec is None:
+                    # Event occurred after cutoff of the final evaluated decision origin
+                    events_with_no_subsequent_decision.append({
+                        "event_row": ev_idx,
+                        "indicator": ind,
+                        "date": str(ev_dt),
+                        "release_timestamp": str(t_rel),
+                        "surprise": surp,
+                    })
+                    continue
+
+                ev_date_val = pd.to_datetime(ev_dt).date()
+                ev_date_cutoff = pd.Timestamp(f"{ev_date_val} 16:00:00", tz="America/New_York")
+                assigned_orig_val = pd.to_datetime(assigned_dec["origin_timestamp"]).date()
+
+                is_trading_date = assigned_dec["origin_timestamp"] in self.common_dates or ev_dt in self.common_dates
+                if is_trading_date and t_rel <= ev_date_cutoff and assigned_orig_val == ev_date_val:
+                    if avail_audit.status == MacroTimestampAudit.AVAILABLE:
+                        release_status = "VERIFIED_AVAILABLE"
+                        is_verified = True
+                        is_legacy = False
+                    else:
+                        release_status = "LEGACY_DATE_ONLY_ASSUMED"
+                        is_verified = False
+                        is_legacy = True
+                    is_post_close = False
+                    is_rolled = False
+                else:
+                    is_rolled = True
+                    is_verified = False
+                    is_legacy = False
+                    if t_rel > ev_date_cutoff:
+                        release_status = "POST_CLOSE"
+                        is_post_close = True
+                    else:
+                        release_status = "NON_TRADING_DAY_RELEASE"
+                        is_post_close = False
+
+                fold_assigned_macro_events[assigned_dec["fold_id"]].append({
+                    "event_idx": ev_idx,
+                    "indicator": ind,
+                    "release_date": ev_dt,
+                    "release_timestamp": t_rel,
+                    "surprise": surp,
+                    "assigned_orig_dt": assigned_dec["origin_timestamp"],
+                    "assigned_target_dt": assigned_dec["target_timestamp"],
+                    "fold_id": assigned_dec["fold_id"],
+                    "fold_k_idx": assigned_dec["fold_k_idx"],
+                    "decision_cutoff_nyc": assigned_dec["cutoff_nyc"],
+                    "release_status": release_status,
+                    "is_verified": is_verified,
+                    "is_legacy": is_legacy,
+                    "is_post_close": is_post_close,
+                    "is_rolled": is_rolled,
+                })
         
         for f_idx, (train_dates, test_dates) in enumerate(folds):
             # Define explicit rolling 1-step forecast origin-target pairs:
@@ -512,14 +642,23 @@ class WalkForwardHarness:
                 "training_event_count": len(m_tr),
                 "calendar_event_count": len(m_te_calendar),
                 "test_event_count": len(m_te_calendar),
+                "observed_decision_events": 0,
                 "evaluated_decision_events": 0,
+                "timestamp_verified_available_events": 0,
+                "legacy_date_only_assumed_events": 0,
                 "timestamp_available_events": 0,
                 "post_close_events": 0,
+                "rolled_to_next_decision_events": 0,
+                "invalid_timestamp_rejected_events": 0,
+                "missing_surprise_events": 0,
                 "usable_surprise_events": 0,
                 "zero_surprise_events": 0,
                 "eligible_coefficient_events": 0,
                 "inadequate_history_events": 0,
+                "active_overlay_events": 0,
+                "zero_impact_events": 0,
                 "nonzero_macro_days": 0,
+                "applied_event_records": [],
             })
 
             # --- MODEL 1: RANDOM WALK ---
@@ -848,17 +987,9 @@ class WalkForwardHarness:
                 yield_df=y_train,
             )
             
-            # Join macro releases by availability at decision origin (orig_dates)
-            # Releases on orig_dt <= 16:00 ET are available at orig_dt close.
-            # Releases after 16:00 ET roll into the next eligible decision origin if available.
-            if self.macro_df is not None and not self.macro_df.empty and "date" in self.macro_df.columns:
-                macro_sub = self.macro_df[self.macro_df["date"].isin(orig_dates)]
-            else:
-                macro_sub = pd.DataFrame()
+            # Join macro releases assigned to this fold across the full evaluated decision calendar
+            assigned_events = fold_assigned_macro_events[f_idx]
             macro_impulse = pd.Series(0.0, index=orig_dates)
-            
-            orig_dates_list = list(orig_dates)
-            orig_idx_map = {dt: i for i, dt in enumerate(orig_dates_list)}
             
             eval_dec_count = 0
             ts_verified_count = 0
@@ -866,7 +997,6 @@ class WalkForwardHarness:
             ts_avail_count = 0
             post_close_count = 0
             rolled_count = 0
-            invalid_ts_rejected_count = 0
             missing_surp_count = 0
             usable_surp_count = 0
             zero_surp_count = 0
@@ -875,79 +1005,111 @@ class WalkForwardHarness:
             active_overlay_count = 0
             zero_impact_count = 0
             orig_release_dates = set()
+            fold_applied_event_records = []
 
-            for _, m_row in macro_sub.iterrows():
-                dt = m_row["date"]
-                ind = m_row.get("indicator")
-                surp = m_row.get("surprise_ann", np.nan)
-                k_idx = orig_idx_map[dt]
-                
-                avail_audit = parse_macro_timestamp_availability(m_row, dt)
-                
-                if avail_audit.status == MacroTimestampAudit.INVALID_TIMESTAMP_REJECTED:
-                    invalid_ts_rejected_count += 1
-                    logger.warning("Rejecting invalid macro timestamp for indicator %s on %s: %s", ind, dt, avail_audit.reason)
-                    continue
-                
+            for a_ev in assigned_events:
                 eval_dec_count += 1
-                orig_release_dates.add(dt)
-                
-                if avail_audit.status == MacroTimestampAudit.POST_CLOSE:
+                dt_orig = a_ev["assigned_orig_dt"]
+                orig_release_dates.add(dt_orig)
+                ind = a_ev["indicator"]
+                surp = a_ev["surprise"]
+
+                # Release-time status accounting
+                if a_ev["is_post_close"]:
                     post_close_count += 1
-                    # Roll rule: after-close releases on an origin enter next eligible decision origin
-                    if k_idx + 1 < len(orig_dates_list):
-                        rolled_count += 1
-                        next_dt = orig_dates_list[k_idx + 1]
-                        # Apply to next_dt macro_impulse if eligible
-                        if not pd.isna(surp) and ind in fold_macro_betas:
-                            b_info = fold_macro_betas[ind]
-                            if b_info.get("status") == "ESTIMATED_CAUSAL" and b_info.get("n_events", 0) >= 8:
-                                if strategy_type in ("2s5s10s", "fly"):
-                                    b_target = b_info.get("curvature_beta", 0.0)
-                                else:
-                                    b_target = b_info.get("slope_beta", 0.0)
-                                macro_impulse.loc[next_dt] += b_target * np.clip(surp, -2.0, 2.0)
-                    continue
-                
-                # Timestamp available for decision origin dt (AVAILABLE or LEGACY_DATE_ONLY_ASSUMED)
-                ts_avail_count += 1
-                if avail_audit.status == MacroTimestampAudit.AVAILABLE:
+                if a_ev["is_rolled"]:
+                    rolled_count += 1
+                if a_ev["is_verified"]:
                     ts_verified_count += 1
-                else:
+                    ts_avail_count += 1
+                elif a_ev["is_legacy"]:
                     legacy_date_assumed_count += 1
-                
+                    ts_avail_count += 1
+
+                # Application-time surprise accounting
                 if pd.isna(surp):
                     missing_surp_count += 1
+                    fold_applied_event_records.append({
+                        "event_idx": a_ev["event_idx"],
+                        "indicator": ind,
+                        "release_date": str(a_ev["release_date"]),
+                        "release_timestamp": str(a_ev["release_timestamp"]),
+                        "assigned_origin_date": str(dt_orig.date()),
+                        "target_date": str(a_ev["assigned_target_dt"].date()) if hasattr(a_ev["assigned_target_dt"], "date") else None,
+                        "fold_id": f_idx,
+                        "surprise": None,
+                        "beta": None,
+                        "impulse": None,
+                        "status": "MISSING_SURPRISE",
+                        "is_rolled": a_ev["is_rolled"],
+                        "is_post_close": a_ev["is_post_close"],
+                        "release_status": a_ev["release_status"],
+                    })
                     continue
+
                 usable_surp_count += 1
-                
                 if surp == 0.0:
                     zero_surp_count += 1
-                    
-                # Check coefficient eligibility: require status == "ESTIMATED_CAUSAL" and n_events >= 8
+
+                # Application-time coefficient eligibility
                 b_info = fold_macro_betas.get(ind, {})
                 is_eligible = (
                     b_info.get("status") == "ESTIMATED_CAUSAL" and
                     b_info.get("n_events", 0) >= 8
                 )
-                
+
                 if not is_eligible:
                     inadequate_hist_count += 1
+                    fold_applied_event_records.append({
+                        "event_idx": a_ev["event_idx"],
+                        "indicator": ind,
+                        "release_date": str(a_ev["release_date"]),
+                        "release_timestamp": str(a_ev["release_timestamp"]),
+                        "assigned_origin_date": str(dt_orig.date()),
+                        "target_date": str(a_ev["assigned_target_dt"].date()) if hasattr(a_ev["assigned_target_dt"], "date") else None,
+                        "fold_id": f_idx,
+                        "surprise": float(surp),
+                        "beta": None,
+                        "impulse": None,
+                        "status": "INADEQUATE_HISTORY",
+                        "is_rolled": a_ev["is_rolled"],
+                        "is_post_close": a_ev["is_post_close"],
+                        "release_status": a_ev["release_status"],
+                    })
                     continue
-                
+
                 eligible_coeff_count += 1
                 if strategy_type in ("2s5s10s", "fly"):
                     b_target = b_info.get("curvature_beta", 0.0)
                 else:
                     b_target = b_info.get("slope_beta", 0.0)
                 impulse_val = b_target * np.clip(surp, -2.0, 2.0)
-                macro_impulse.loc[dt] += impulse_val
-                
+                macro_impulse.loc[dt_orig] += impulse_val
+
                 if impulse_val != 0.0:
                     active_overlay_count += 1
+                    ev_status = "ACTIVE_OVERLAY"
                 else:
                     zero_impact_count += 1
-            
+                    ev_status = "ZERO_IMPACT"
+
+                fold_applied_event_records.append({
+                    "event_idx": a_ev["event_idx"],
+                    "indicator": ind,
+                    "release_date": str(a_ev["release_date"]),
+                    "release_timestamp": str(a_ev["release_timestamp"]),
+                    "assigned_origin_date": str(dt_orig.date()),
+                    "target_date": str(a_ev["assigned_target_dt"].date()) if hasattr(a_ev["assigned_target_dt"], "date") else None,
+                    "fold_id": f_idx,
+                    "surprise": float(surp),
+                    "beta": float(b_target),
+                    "impulse": float(impulse_val),
+                    "status": ev_status,
+                    "is_rolled": a_ev["is_rolled"],
+                    "is_post_close": a_ev["is_post_close"],
+                    "release_status": a_ev["release_status"],
+                })
+
             nonzero_macro_days = int((macro_impulse != 0.0).sum())
             fold_macro_audit[-1]["observed_decision_events"] = eval_dec_count
             fold_macro_audit[-1]["evaluated_decision_events"] = eval_dec_count
@@ -956,7 +1118,6 @@ class WalkForwardHarness:
             fold_macro_audit[-1]["timestamp_available_events"] = ts_avail_count
             fold_macro_audit[-1]["post_close_events"] = post_close_count
             fold_macro_audit[-1]["rolled_to_next_decision_events"] = rolled_count
-            fold_macro_audit[-1]["invalid_timestamp_rejected_events"] = invalid_ts_rejected_count
             fold_macro_audit[-1]["missing_surprise_events"] = missing_surp_count
             fold_macro_audit[-1]["usable_surprise_events"] = usable_surp_count
             fold_macro_audit[-1]["zero_surprise_events"] = zero_surp_count
@@ -965,6 +1126,7 @@ class WalkForwardHarness:
             fold_macro_audit[-1]["active_overlay_events"] = active_overlay_count
             fold_macro_audit[-1]["zero_impact_events"] = zero_impact_count
             fold_macro_audit[-1]["nonzero_macro_days"] = nonzero_macro_days
+            fold_macro_audit[-1]["applied_event_records"] = fold_applied_event_records
             
             macro_scale = macro_impulse.loc[orig_dates].values / train_spread_std
             macro_overlay_input = 0.60 * sig_kf_arr + 0.40 * macro_scale
@@ -1017,6 +1179,24 @@ class WalkForwardHarness:
                     status=ForecastStatus.SCORED,
                     reason=overlay_reason,
                 ))
+                # 3. For nonzero overlay, record traceable event-level impulse in ledger
+                if overlay_val != 0.0:
+                    for ev_rec in fold_applied_event_records:
+                        if ev_rec["assigned_origin_date"] == str(orig_dt.date()) and ev_rec["status"] == "ACTIVE_OVERLAY":
+                            ledger.add_record(ForecastRecord(
+                                run_id=ledger.run_id,
+                                model_id="DNS_Kalman_Macro",
+                                fold_id=f_idx,
+                                training_cutoff=train_dates[-1],
+                                origin_timestamp=orig_dt,
+                                target_timestamp=tgt_dt,
+                                target_type="macro_event_impulse",
+                                target_name=ev_rec["indicator"],
+                                forecast=ev_rec["impulse"],
+                                actual=None,
+                                status=ForecastStatus.SCORED,
+                                reason="ACTIVE_MACRO_IMPULSE",
+                            ))
 
             # --- MODEL 6: GRADIENT BOOSTED MODEL (GBM) ---
             if hasattr(self, "X_ml") and not self.X_ml.empty:
@@ -1251,7 +1431,7 @@ class WalkForwardHarness:
         total_timestamp_available_events = sum(f.get("timestamp_available_events", 0) for f in fold_macro_audit)
         total_post_close_events = sum(f.get("post_close_events", 0) for f in fold_macro_audit)
         total_rolled_to_next_decision_events = sum(f.get("rolled_to_next_decision_events", 0) for f in fold_macro_audit)
-        total_invalid_timestamp_rejected_events = sum(f.get("invalid_timestamp_rejected_events", 0) for f in fold_macro_audit)
+        total_invalid_timestamp_rejected_events = len(unassigned_invalid_timestamp_events) + sum(f.get("invalid_timestamp_rejected_events", 0) for f in fold_macro_audit)
         total_missing_surprise_events = sum(f.get("missing_surprise_events", 0) for f in fold_macro_audit)
         total_usable_surprise_events = sum(f.get("usable_surprise_events", 0) for f in fold_macro_audit)
         total_zero_surprise_events = sum(f.get("zero_surprise_events", 0) for f in fold_macro_audit)
@@ -1260,6 +1440,9 @@ class WalkForwardHarness:
         total_active_overlay_events = sum(f.get("active_overlay_events", 0) for f in fold_macro_audit)
         total_zero_impact_events = sum(f.get("zero_impact_events", 0) for f in fold_macro_audit)
         total_nonzero_macro_days = sum(f.get("nonzero_macro_days", 0) for f in fold_macro_audit)
+        total_applied_event_records = []
+        for f in fold_macro_audit:
+            total_applied_event_records.extend(f.get("applied_event_records", []))
 
         if total_evaluated_decision_events == 0:
             macro_eval_status = "NOT_EVALUATED (NO_TEST_RELEASES)"
@@ -1461,6 +1644,7 @@ class WalkForwardHarness:
             "gbm_backend": getattr(self.config, "gbm_backend", "sklearn"),
             "ledger_summary": ledger.summary_by_model(),
             "macro_event_audit": {
+                "macro_data_coverage_end": macro_coverage_end_str,
                 "total_training_events": total_train_macro_events,
                 "total_calendar_events": total_calendar_events,
                 "total_test_events": total_calendar_events,
@@ -1472,6 +1656,8 @@ class WalkForwardHarness:
                 "total_post_close_events": total_post_close_events,
                 "total_rolled_to_next_decision_events": total_rolled_to_next_decision_events,
                 "total_invalid_timestamp_rejected_events": total_invalid_timestamp_rejected_events,
+                "total_events_with_no_subsequent_decision": len(events_with_no_subsequent_decision),
+                "events_with_no_subsequent_decision": events_with_no_subsequent_decision,
                 "total_missing_surprise_events": total_missing_surprise_events,
                 "total_usable_surprise_events": total_usable_surprise_events,
                 "total_zero_surprise_events": total_zero_surprise_events,
@@ -1480,6 +1666,7 @@ class WalkForwardHarness:
                 "total_active_overlay_events": total_active_overlay_events,
                 "total_zero_impact_events": total_zero_impact_events,
                 "nonzero_macro_days": total_nonzero_macro_days,
+                "applied_event_records": total_applied_event_records,
                 "curve_forecast_provenance": "COPIED_DNS_CURVE_FORECAST",
                 "strategy_overlay_status": "ACTIVE_OVERLAY" if total_nonzero_macro_days > 0 else (
                     "INACTIVE_ZERO_RELEASES" if total_evaluated_decision_events == 0 else "INACTIVE_ZERO_SURPRISE_OR_INADEQUATE_HISTORY"
