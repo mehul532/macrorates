@@ -170,6 +170,7 @@ class SurpriseEngine:
         min_observations: int = 12,
         ddof: int = 1,
         use_lagged_expanding_scale: bool = True,
+        prior_sigma: float = 1.0,
     ) -> Tuple[pd.Series, pd.Series, float]:
         """
         Compute standardized announcement surprise.
@@ -179,7 +180,8 @@ class SurpriseEngine:
         - Missing consensus: if forecast is NaN, surprise remains NaN (never filled with 0.0).
         - If use_lagged_expanding_scale=True, scale sigma_i is computed strictly on prior
           observations {s_0, ..., s_{i-1}} with ddof=1.
-          Guarantees causal invariance: future releases cannot alter past standardized surprises.
+          Warmup repair: no earlier surprise uses later releases; prior to min_observations
+          prior_sigma is used without looking ahead at future releases.
         - Zero-variance protection: sigma_i clipped to minimum 1e-4.
         
         Returns:
@@ -198,18 +200,20 @@ class SurpriseEngine:
 
         std_surprise = pd.Series(np.nan, index=df.index, dtype=float)
         valid_history = []
-        all_valid = raw_surprise.dropna().values
-        init_sigma = float(np.std(all_valid[:min_observations], ddof=ddof)) if len(all_valid) >= min_observations else 1.0
-        if init_sigma <= 1e-6 or np.isnan(init_sigma):
-            init_sigma = 1.0
+        current_sigma = float(prior_sigma) if prior_sigma > 1e-6 else 1.0
 
-        current_sigma = init_sigma
         for i in range(n):
             val = raw_surprise.iloc[i]
             if len(valid_history) >= min_observations:
                 s = float(np.std(valid_history, ddof=ddof))
                 if s > 1e-6 and not np.isnan(s):
                     current_sigma = s
+            elif len(valid_history) >= 1:
+                # Causal warmup: zero-mean RMS on strictly prior observations without lookahead
+                s = float(np.sqrt(np.mean(np.square(valid_history))))
+                if s > 1e-6 and not np.isnan(s):
+                    current_sigma = s
+
             if not np.isnan(val):
                 std_surprise.iloc[i] = val / current_sigma
                 valid_history.append(val)
@@ -225,10 +229,12 @@ class SurpriseEngine:
         min_history: int = 12,
         ddof: int = 1,
         use_lagged_expanding_scale: bool = True,
+        prior_sigma: float = 1.0,
     ) -> Tuple[pd.Series, pd.Series, float]:
         """
         Compute out-of-sample model innovation using STRICTLY data through t-1,
         with causal lagged expanding innovation standardizers.
+        Warmup repair: no earlier innovation uses later releases.
         """
         n = len(df)
         actuals = df[actual_col].values
@@ -273,16 +279,17 @@ class SurpriseEngine:
 
         std_errors = pd.Series(np.nan, index=df.index, dtype=float)
         valid_innov_history = []
-        all_valid_e = raw_errors.dropna().values
-        init_sigma = float(np.std(all_valid_e[:min_history], ddof=ddof)) if len(all_valid_e) >= min_history else 1.0
-        if init_sigma <= 1e-6 or np.isnan(init_sigma):
-            init_sigma = 1.0
+        current_sigma = float(prior_sigma) if prior_sigma > 1e-6 else 1.0
 
-        current_sigma = init_sigma
         for i in range(n):
             err = raw_errors.iloc[i]
             if len(valid_innov_history) >= min_history:
                 s = float(np.std(valid_innov_history, ddof=ddof))
+                if s > 1e-6 and not np.isnan(s):
+                    current_sigma = s
+            elif len(valid_innov_history) >= 1:
+                # Causal warmup: zero-mean RMS on strictly prior innovations without lookahead
+                s = float(np.sqrt(np.mean(np.square(valid_innov_history))))
                 if s > 1e-6 and not np.isnan(s):
                     current_sigma = s
             if not np.isnan(err):

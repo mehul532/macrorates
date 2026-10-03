@@ -1,23 +1,59 @@
-# Milestone 14 Verdict: Machine Learning Baseline & Feature Attribution
+# Milestone 14 Verdict: Machine Learning Baseline & Point-in-Time Evaluation Gate
 
 **Author**: MacroRates Research Team  
-**Git Commit**: `60ce350cee4eb9a59afe2b6de7d9e03f6af5da4f`  
+**Git Commit**: `c7eb2ea361f5b7871db6fe0b03080da27815afdd-dirty`  
 **Run Mode**: `QUICK_TWO_FOLD_EVALUATION` (Folds: 2)  
 **Evaluated Sample**: 2026-06-29 to 2026-09-17 (57 trading days)  
 **Backend**: `sklearn` | **Seed**: `42`  
 
 > [!IMPORTANT]
-> **RESEARCH INTEGRITY & CAUSALITY AUDIT DISCLOSURES**:
-> 1. **Macro Data Coverage & Status**: The committed macro dataset (`data/processed/macro_surprises.parquet`) ends on 2026-04-10. During the evaluated test period (2026-06-29 to 2026-09-17), there were **0 calendar test events** and **0 observed decision origin events**. Therefore, `DNS + Kalman + Macro` is formally audited and categorized as **`NOT_EVALUATED (NO_TEST_RELEASES)`**. No empirical claims of out-of-sample macro forecasting superiority or trading alpha are supported by this test window.
-> 2. **60% Exposure Control Finding**: The control model `DNS (60% Exposure Control)` trades an exact linear scaling of the baseline DNS signal ($s_t = 0.60 \times s_{t}^{\text{DNS}}$). In the evaluation, it produced trading results identical to `DNS + Kalman + Macro` (Net PnL: $-26,942.15), confirming that when macroeconomic releases are inactive or neutral, any historical PnL difference was entirely due to linear risk/exposure downscaling, not macroeconomic information.
-> 3. **Observational vs. Causal Attribution**: TreeSHAP and Gini feature rankings describe statistical feature associations within gradient-boosted decision trees. They are descriptive diagnostics, NOT proof of causal macroeconomic transmission mechanisms.
-> 4. **Econometric Decomposition**: Traditional level-reconstruction models (Static NS, DNS Kalman) exhibit ~28.8 bp 2s10s spread RMSE driven predominantly by cross-sectional curve-fitting errors (~28.5 bp in spread space), which push spread forecasts into extreme values that saturate the $\pm 1.0$ signal clip. The diagnostic residual-preserving formulation ($\hat{y}_{t+1|t}^{\text{res}} = y_t + \Lambda(\hat{\beta}_{t+1|t} - \beta_t)$) addresses this cross-sectional bias, reducing spread RMSE from 28.82 bp to 2.90 bp and signal clipping from 100.0% to 0.0%.
-> 5. **Annualization & Statistics Corrections**: Sharpe and Sortino ratios are annualized with $\sqrt{252}$ strictly on standard deviation ($(\mu \times 252) / (\sigma \times \sqrt{252}) = (\mu \times \sqrt{252}) / \sigma$). Hit rates are computed strictly over active trading days; zero-trading benchmarks (Random Walk, Cash Only) report `N/A`, avoiding false 100% hit rate claims.
-> 6. **Benchmark Discipline**: Random Walk provides the unparameterized zero-increment curve forecasting benchmark. Cash-Only provides an unencumbered capital strategy benchmark. Models are evaluated on common out-of-sample test dates without retroactive tuning or artificial error multipliers.
+> **POINT-IN-TIME EVALUATION GATE & RESEARCH INTEGRITY DISCLOSURES**:
+> 1. **Holdout Evaluation Gate Verdict**: The evaluated 57-day sample is audited as **`DEVELOPMENT_EVIDENCE`**. The gate verdict is **`NOT_EVALUABLE`**. An event-covered, genuinely untouched holdout is unavailable; therefore, **NO MACRO-ALPHA VERDICT IS REPORTED**.
+> 2. **Forecast vs. Trading Separation**: Yield curve and spread forecast accuracy (RMSE in basis points) are strictly separated from trading performance (Sharpe, Sortino, turnover, and PnL). Forecast evaluations assess econometric predictability; trading evaluations measure strategy execution under risk-budget constraints.
+> 3. **Research Proxy & Par Yield Disclosure**: Trading net PnL, Sharpe ratios, and DV01 returns are a synthetic research proxy based on daily rebalancing of constant-maturity Treasury yields. Any executable profit claim requires historical tradable futures or cash bond prices, contract rolls, bid-ask spreads, and financing costs. [U.S. Treasury Daily Treasury Par Yield Curve Rates](https://home.treasury.gov/policy-issues/financing-the-government/interest-rate-statistics/) are indicative market quotes based on FRBNY composite closing quotes.
+> 4. **Curve Provenance**: Yield curve forecasts for `DNS_Kalman_Macro` are tagged `COPIED_DNS_CURVE_FORECAST` regardless of overlay activity.
+> 5. **Macro Data Coverage & Status**: The committed macro dataset (`data/processed/macro_surprises.parquet`) ends on 2026-04-10. During the evaluated test period (2026-06-29 to 2026-09-17), there were **0 calendar test events** and **0 observed decision origin events**. Therefore, `DNS + Kalman + Macro` is formally audited and categorized as **`NOT_EVALUATED (NO_TEST_RELEASES)`**.
+> 6. **60% Exposure Control Finding**: The control model `DNS (60% Exposure Control)` trades an exact linear scaling of the baseline DNS signal ($s_t = 0.60 \times s_{t}^{\text{DNS}}$). In the evaluation, it produced trading results identical to `DNS + Kalman + Macro` (Net PnL: $-26,942.15), confirming that when macroeconomic releases are inactive or neutral, any historical PnL difference was entirely due to linear risk/exposure downscaling, not macroeconomic information.
+> 7. **Observational vs. Causal Attribution**: TreeSHAP and Gini feature rankings describe statistical feature associations within gradient-boosted decision trees. They are descriptive diagnostics, NOT proof of causal macroeconomic transmission mechanisms.
+> 8. **Econometric Decomposition**: Traditional level-reconstruction models (Static NS, DNS Kalman) exhibit ~28.8 bp 2s10s spread RMSE driven predominantly by cross-sectional curve-fitting errors (~28.5 bp in spread space), which push spread forecasts into extreme values that saturate the $\pm 1.0$ signal clip. The diagnostic residual-preserving formulation addresses this cross-sectional bias, reducing spread RMSE from 28.82 bp to 2.90 bp and signal clipping from 100.0% to 0.0%.
+> 9. **Annualization & Statistics Corrections**: Sharpe and Sortino ratios are annualized with $\sqrt{252}$ strictly on standard deviation ($(\mu \times 252) / (\sigma \times \sqrt{252}) = (\mu \times \sqrt{252}) / \sigma$). Hit rates are computed strictly over active trading days; zero-trading benchmarks (Random Walk, Cash Only) report `N/A`, avoiding false 100% hit rate claims.
+> 10. **Benchmark Discipline**: Random Walk provides the unparameterized zero-increment curve forecasting benchmark. Cash-Only provides an unencumbered capital strategy benchmark. Models are evaluated on common out-of-sample test dates without retroactive tuning or artificial error multipliers.
 
 ---
 
-## 1. Run Provenance & Data Checksums
+## 1. Point-in-Time Evaluation Gate Verdict & Run Manifest
+
+| Gate Field | Status / Value | Audit Interpretation |
+| :--- | :---: | :--- |
+| **Gate Verdict** | **`NOT_EVALUABLE`** | Formal point-in-time readiness gate determination |
+| **Evaluation Tier** | **`DEVELOPMENT_EVIDENCE`** | Development evidence (not an untouched holdout) |
+| **Macro-Alpha Verdict** | **`NONE (HOLD OUT NOT EVALUABLE - ALPHA CLAIMS BARRED)`** | Alpha claims strictly barred until holdout criteria are met |
+| **Run Manifest SHA-256** | `97020ce19abee4c5` | Immutable run manifest serialized at `reports/point_in_time_manifest.json` |
+
+### Missing Data & Minimum Predeclared Sample Requirements
+**Missing Data Reasons**:
+- Macro announcement dataset coverage ends on 2026-04-10; 0 macro events occurred in the evaluated test window.
+- Zero active macro decision days occurred in the evaluated holdout.
+- Evaluated sample size (57 days) is less than the predeclared minimum holdout requirement of 252 trading days.
+- Contemporaneous consensus survey vintages timestamped strictly prior to release are not available across all target indicators.
+
+**Predeclared Minimum Holdout Criteria**:
+- **Minimum Holdout Trading Days**: $\ge 252$ trading days
+- **Minimum Independent Releases**: $\ge 20$ releases across CPI, NFP, FOMC
+- **Minimum Active Event Days**: $\ge 10$ days
+- **Provenance Standard**: Unrevised first-release actuals with timestamped contemporaneous consensus vintages verifiably available strictly prior to decision cutoff.
+- **Execution Proxy**: Historical tradable instrument prices, contract rolls, bid-ask spreads, and execution fees (indicative par yield changes are a research proxy).
+
+### Event Coverage Table by Fold
+
+| Fold | Training Cutoff | Test Window | Independent Releases | Active Event Days | Missing Consensus or Timestamps | Nonzero Overlay Days |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| 0 | 2026-06-26 | 2026-06-29 to 2026-08-26 | 0 | 0 | 0 | 0 |
+| 1 | 2026-08-26 | 2026-08-27 to 2026-09-17 | 0 | 0 | 0 | 0 |
+
+---
+
+## 2. Run Provenance & Data Checksums
 
 | Input Panel | SHA-256 Checksum (16-char) | Path |
 | :--- | :--- | :--- |
@@ -27,7 +63,7 @@
 
 ---
 
-## 2. Macro Event Coverage Audit
+## 3. Macro Event Coverage Audit
 
 | Metric | Value | Interpretation |
 | :--- | :---: | :--- |
@@ -52,7 +88,7 @@
 
 ---
 
-## 3. Econometric Diagnostics & Error Decomposition
+## 4. Econometric Diagnostics & Error Decomposition
 
 ### Observable 2s10s Spread Forecast Error Decomposition ($e_s = u_{\text{factor}} + u_{\text{fit}}$)
 *Exact mathematical decomposition in the observable 2s10s spread space, including the twice uncentered second cross moment:*
@@ -91,7 +127,7 @@
 | `DNS_Kalman_Macro` | ±1.00 | 0.0% | 100.0% | 0.0% | 0.0% | 0.600 |
 | `DNS_Kalman_Residual_Preserving` | ±1.00 | 0.0% | 0.0% | 0.0% | 0.0% | 0.027 |
 | `DNS_Scaled_60` | ±0.60 | 0.0% | 100.0% | 0.0% | 100.0% | 0.600 |
-| `GBM` | ±1.00 | 100.0% | 0.0% | 100.0% | 100.0% | 5.668 |
+| `GBM` | ±1.00 | 100.0% | 0.0% | 100.0% | 100.0% | 5.669 |
 | `PCA_VAR` | ±1.00 | 47.4% | 0.0% | 47.4% | 47.4% | 0.948 |
 | `Random_Walk` | ±1.00 | 0.0% | 0.0% | 0.0% | 0.0% | 0.000 |
 | `Static_NS` | ±1.00 | 100.0% | 0.0% | 100.0% | 100.0% | 7.834 |
@@ -103,7 +139,7 @@
 
 ---
 
-## 4. Feature Attribution Summary
+## 5. Feature Attribution Summary
 
 - **Level ($\\Delta L_{t+1}$)**: Key features by empirical split impact: `dlevel_1d, dcurvature_1d, dslope_1d`
 - **Slope ($\\Delta S_{t+1}$)**: Key features by empirical split impact: `dslope_1d, dlevel_1d, dslope_2d`
@@ -113,7 +149,7 @@
 
 ---
 
-## 5. Common-Sample Out-of-Sample Performance Table
+## 6. Common-Sample Out-of-Sample Performance Table
 
 | Model / Forecast Method | Benchmark Role | Forecast Status | Sample Size (Days) | OOS Curve RMSE (bp) | 2Y Curve RMSE (bp) | 5Y Curve RMSE (bp) | 10Y Curve RMSE (bp) | 2s10s Spread RMSE (bp) | 2s5s10s Fly RMSE (bp) | Factor Forecast RMSE (bp) | Strategy Sharpe | Sortino Ratio | Max Drawdown (%) | Annual Turnover (lots) | Hit Rate (%) | PnL / DV01 ($) | PnL / Turnover ($/lot) | Gross PnL ($) | Trade Costs ($) | Roll Costs ($) | Trading Net PnL ($) | Cash Interest ($) | Collateral Net PnL ($) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -122,7 +158,7 @@
 | AR(1) Baseline (Static NS) | AR(1) Baseline | EVALUATED | 57 | 12.75 | 15.36 | 12.16 | 14.63 | 28.82 | 23.03 | 28.82 | -0.44 | -0.61 | -2.26 | 3360.00 | 50.88 | -4.67 | -61.43 | -40133.76 | 5030.62 | 1520.00 | -46684.38 | 88344.94 | 41660.55 |
 | DNS + Kalman | Dynamic Term Structure Model | EVALUATED | 57 | 12.83 | 16.52 | 11.17 | 14.48 | 29.90 | 22.38 | 29.90 | -0.44 | -0.61 | -2.26 | 3360.00 | 50.88 | -4.67 | -61.43 | -40133.76 | 5030.62 | 1520.00 | -46684.38 | 88344.94 | 41660.55 |
 | DNS + Kalman + Macro | Macro-Augmented DTSM | NOT_EVALUATED (NO_TEST_RELEASES) | 57 | 12.83 | 16.52 | 11.17 | 14.48 | 29.90 | 22.38 | 29.90 | -0.44 | -0.61 | -1.17 | 1936.40 | 50.88 | -2.69 | -61.51 | -23166.96 | 2899.19 | 876.00 | -26942.15 | 89095.23 | 62153.08 |
-| GBM | Machine Learning Baseline | EVALUATED | 57 | 13.59 | 12.58 | 11.28 | 9.93 | 20.94 | 23.26 | 20.94 | -0.44 | -0.61 | -2.26 | 3360.00 | 50.88 | -4.67 | -61.43 | -40133.76 | 5030.62 | 1520.00 | -46684.38 | 88344.94 | 41660.55 |
+| GBM | Machine Learning Baseline | EVALUATED | 57 | 13.59 | 12.59 | 11.25 | 9.90 | 20.94 | 23.26 | 20.94 | -0.44 | -0.61 | -2.26 | 3360.00 | 50.88 | -4.67 | -61.43 | -40133.76 | 5030.62 | 1520.00 | -46684.38 | 88344.94 | 41660.55 |
 | DNS (60% Exposure Control) | Risk-Scaling Control (60% Exposure) | CONTROL (SCALED_DNS) | 57 | 12.83 | 16.52 | 11.17 | 14.48 | 29.90 | 22.38 | 29.90 | -0.44 | -0.61 | -1.17 | 1936.40 | 50.88 | -2.69 | -61.51 | -23166.96 | 2899.19 | 876.00 | -26942.15 | 89095.23 | 62153.08 |
 | Static NS (Residual-Preserving Diagnostic) | Diagnostic (Static NS Residual-Preserving) | DIAGNOSTIC | 57 | 4.36 | 5.20 | 5.01 | 4.57 | 2.90 | 1.77 | 2.90 | -0.26 | -0.37 | -0.05 | 1282.10 | 43.86 | -0.21 | -7.11 | -27.56 | 1919.38 | 116.00 | -2062.93 | 89982.55 | 87919.62 |
 | DNS + Kalman (Residual-Preserving Diagnostic) | Diagnostic (DNS Kalman Residual-Preserving) | DIAGNOSTIC | 57 | 4.36 | 5.19 | 5.01 | 4.57 | 2.90 | 1.77 | 2.90 | -1.11 | -1.54 | -0.05 | 1794.90 | 42.11 | -0.90 | -22.06 | -6152.46 | 2687.12 | 116.00 | -8955.58 | 89959.92 | 81004.33 |
@@ -130,6 +166,6 @@
 
 ---
 
-## 6. Visual Diagnostics
+## 7. Visual Diagnostics
 - `reports/figures/gbm_shap_summary.png`: Displays top feature attribution drivers across Level, Slope, and Curvature.
 - `reports/figures/gbm_feature_importance.png`: Aggregated feature importance across term-structure dimensions.

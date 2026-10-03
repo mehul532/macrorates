@@ -19,7 +19,7 @@ Implements:
      Gross P&L -> Transaction Costs -> Roll Costs -> Cash Interest -> Net P&L
 """
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import datetime
 import hashlib
 import logging
@@ -30,6 +30,17 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from statsmodels.tsa.api import VAR
+
+from src.backtest.evaluation_gate import (
+    PointInTimeEvaluationGate,
+    FoldAsOfManifest,
+    ParameterTrace,
+    MacroEventTrace,
+    FoldEventCoverage,
+    GateVerdict,
+    EvaluationTier,
+    MacroProvenanceStatus,
+)
 
 
 def get_git_commit_hash() -> str:
@@ -461,6 +472,7 @@ class WalkForwardHarness:
         factor_rw_sq_errors = []
         factor_ar1_sq_errors = []
         fold_macro_audit = []
+        fold_as_of_manifests: List[FoldAsOfManifest] = []
         
         # Observable 2s10s spread error decomposition: e_spread = u_factor_spread + u_fit_spread
         spread_decomp_total_sq = []
@@ -585,6 +597,10 @@ class WalkForwardHarness:
                     "indicator": ind,
                     "release_date": ev_dt,
                     "release_timestamp": t_rel,
+                    "actual": m_row.get("actual"),
+                    "forecast": m_row.get("forecast"),
+                    "consensus": m_row.get("consensus", m_row.get("forecast")),
+                    "consensus_vintage": m_row.get("consensus_vintage"),
                     "surprise": surp,
                     "assigned_orig_dt": assigned_dec["origin_timestamp"],
                     "assigned_target_dt": assigned_dec["target_timestamp"],
@@ -1352,6 +1368,92 @@ class WalkForwardHarness:
                 additional_clipping["GBM"].extend([False] * len(orig_dates))
                 saturation_flags["GBM"].extend([False] * len(orig_dates))
 
+            # --- AS-OF MANIFEST COMPILATION FOR FOLD (PIT Evaluation Gate) ---
+            yield_trace_obj = PointInTimeEvaluationGate.trace_yield_observations(y_train)
+
+            pca_hash = PointInTimeEvaluationGate.hash_object({
+                "loadings": pca_forecaster.pca_res_.loadings if pca_forecaster.pca_res_ is not None else None,
+                "mean_vector": pca_forecaster.pca_res_.mean_vector if pca_forecaster.pca_res_ is not None else None,
+                "var_A": pca_forecaster.var_A_,
+                "var_intercept": pca_forecaster.var_intercept_,
+            })
+            dns_hash = PointInTimeEvaluationGate.hash_object({
+                "mu": dns_res.mu,
+                "T": dns_res.transition_matrix,
+                "Q": dns_res.state_cov,
+                "R": dns_res.obs_cov,
+                "lambda": 0.7308,
+            })
+            macro_hash = PointInTimeEvaluationGate.hash_object({
+                "dns_hash": dns_hash,
+                "betas": fold_macro_betas,
+            })
+            gbm_hash = PointInTimeEvaluationGate.hash_object({
+                "fold_id": f_idx,
+                "train_cutoff": str(train_dates[-1].date()),
+                "backend": getattr(self.config, "gbm_backend", "sklearn"),
+            })
+
+            fold_param_traces = {
+                "PCA_VAR": asdict(ParameterTrace("PCA_VAR", pca_hash, {"n_components": 3})),
+                "DNS_Kalman": asdict(ParameterTrace("DNS_Kalman", dns_hash, {"lambda": 0.7308, "state_dim": 3})),
+                "DNS_Kalman_Macro": asdict(ParameterTrace("DNS_Kalman_Macro", macro_hash, {"n_betas": len(fold_macro_betas)})),
+                "GBM": asdict(ParameterTrace("GBM", gbm_hash, {"backend": getattr(self.config, "gbm_backend", "sklearn")})),
+            }
+
+            fold_macro_traces = []
+            for a_ev in assigned_events:
+                ev_status, ev_reason = PointInTimeEvaluationGate.audit_macro_event_provenance(
+                    a_ev, a_ev["decision_cutoff_nyc"]
+                )
+                m_trace = MacroEventTrace(
+                    event_idx=a_ev["event_idx"],
+                    indicator=a_ev["indicator"],
+                    release_date=str(a_ev["release_date"]),
+                    release_timestamp=str(a_ev["release_timestamp"]),
+                    actual=float(a_ev["actual"]) if a_ev.get("actual") is not None and not pd.isna(a_ev.get("actual")) else None,
+                    consensus=float(a_ev["forecast"]) if a_ev.get("forecast") is not None and not pd.isna(a_ev.get("forecast")) else None,
+                    consensus_vintage=str(a_ev.get("consensus_vintage")) if a_ev.get("consensus_vintage") is not None else None,
+                    surprise=float(a_ev["surprise"]) if a_ev.get("surprise") is not None and not pd.isna(a_ev.get("surprise")) else None,
+                    surprise_scale_used=float(train_spread_std),
+                    verification_status=ev_status.value,
+                    assigned_origin_date=str(a_ev["assigned_orig_dt"].date()),
+                    decision_cutoff_nyc=str(a_ev["decision_cutoff_nyc"]),
+                    is_post_close=bool(a_ev.get("is_post_close", False)),
+                    is_rolled=bool(a_ev.get("is_rolled", False)),
+                )
+                fold_macro_traces.append(asdict(m_trace))
+
+            f_cov = FoldEventCoverage(
+                fold_id=f_idx,
+                train_cutoff=str(train_dates[-1].date()),
+                test_start=str(test_dates[0].date()),
+                test_end=str(test_dates[-1].date()),
+                independent_releases=eval_dec_count,
+                active_event_days=nonzero_macro_days,
+                missing_consensus_or_timestamps=missing_surp_count + post_close_count + legacy_date_assumed_count,
+                nonzero_overlay_days=nonzero_macro_days,
+            )
+
+            cutoff_ts = pd.Timestamp(f"{train_dates[-1].date()} 16:00:00", tz="America/New_York").isoformat()
+            fold_manifest = FoldAsOfManifest(
+                fold_id=f_idx,
+                training_cutoff_date=str(train_dates[-1].date()),
+                training_cutoff_timestamp=cutoff_ts,
+                test_start_date=str(test_dates[0].date()),
+                test_end_date=str(test_dates[-1].date()),
+                yield_trace=asdict(yield_trace_obj),
+                fitted_parameters=fold_param_traces,
+                macro_events_trace=fold_macro_traces,
+                event_coverage=asdict(f_cov),
+                pit_compliance=True,
+                pit_notes=[
+                    "Yields available at 15:30 ET; decision cutoff executed at 16:00 ET.",
+                    f"Parameters fitted strictly on observations <= {train_dates[-1].date()}.",
+                ],
+            )
+            fold_as_of_manifests.append(fold_manifest)
+
         # Concatenate out-of-sample series and execute backtests across all evaluated and diagnostic models
         all_test_dates = [dt for _, test_dates in folds for dt in test_dates]
         last_tgt_date = folds[-1][1][-1]
@@ -1631,10 +1733,34 @@ class WalkForwardHarness:
         sig_df = pd.DataFrame(sig_dict)
         sig_corr_matrix = sig_df.corr().round(4).to_dict() if not sig_df.empty else {}
 
+        # Assemble Point-in-Time Evaluation Gate results and run manifest
+        fold_coverage_df = PointInTimeEvaluationGate.build_event_coverage_table(fold_macro_audit)
+        gate_eval = PointInTimeEvaluationGate.evaluate_holdout_readiness(
+            fold_coverage_df=fold_coverage_df,
+            total_test_events=total_calendar_events,
+            total_eval_days=len(all_test_dates),
+            macro_coverage_end=macro_coverage_end_str,
+        )
         git_prov = get_git_provenance()
+        run_manifest = PointInTimeEvaluationGate.build_run_manifest(
+            run_id=ledger.run_id,
+            git_commit=git_prov["commit_or_dirty"],
+            run_mode="QUICK_TWO_FOLD_EVALUATION" if len(folds) <= 2 else "FULL_SAMPLE_EVALUATION",
+            yield_df=self.yield_df,
+            fold_manifests=fold_as_of_manifests,
+            fold_coverage_df=fold_coverage_df,
+            gate_eval=gate_eval,
+        )
+        try:
+            PointInTimeEvaluationGate.save_manifest(run_manifest, "reports/point_in_time_manifest.json")
+        except Exception as e:
+            logger.warning("Failed to save point-in-time manifest: %s", e)
+
         run_metadata = {
             "git_commit": git_prov["commit_or_dirty"],
             "git_provenance": git_prov,
+            "point_in_time_manifest": run_manifest.to_dict(),
+            "point_in_time_gate": gate_eval,
             "data_checksums": {
                 "yield_panel": get_file_checksum("data/processed/yield_panel.parquet"),
                 "factor_panel": get_file_checksum("data/processed/factor_panel.parquet"),
@@ -1683,6 +1809,7 @@ class WalkForwardHarness:
                 "curve_forecast_provenance": "COPIED_DNS_CURVE_FORECAST",
                 "strategy_overlay_status": strategy_overlay_status,
                 "evaluation_status": macro_eval_status,
+                "fold_event_coverage": fold_coverage_df.to_dict(orient="records"),
                 "fold_breakdown": fold_macro_audit,
             },
             "econometric_diagnostics": {

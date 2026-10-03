@@ -47,6 +47,144 @@ class FactorFeatureEngineer:
     TARGET_INDICATORS = ["CPI", "CORE_CPI", "NFP", "UNEMP", "FOMC"]
 
     @classmethod
+    def align_macro_events_to_decisions(
+        cls,
+        macro_df: pd.DataFrame,
+        trading_dates: pd.DatetimeIndex,
+    ) -> pd.DataFrame:
+        """
+        Map macro announcements to effective decision origin dates respecting 16:00 ET cutoff.
+        - Events after 16:00 ET roll causally to the next trading day.
+        - Events on non-trading days (weekends/holidays) roll causally to the next trading day.
+        - Events missing consensus or actual are strictly excluded from announcement features.
+        """
+        if macro_df is None or macro_df.empty or "date" not in macro_df.columns:
+            return pd.DataFrame()
+
+        sorted_trading = sorted(trading_dates)
+        trading_set = set(sorted_trading)
+        records = []
+
+        for _, row in macro_df.iterrows():
+            ev_date = pd.to_datetime(row["date"])
+            ts_val = row.get("timestamp")
+            
+            # Check availability time against 16:00 ET cutoff
+            is_post_close = False
+            if ts_val is not None and not pd.isna(ts_val):
+                try:
+                    ts_dt = pd.to_datetime(ts_val)
+                    if ts_dt.tzinfo is None:
+                        ts_dt = ts_dt.tz_localize("America/New_York")
+                    else:
+                        ts_dt = ts_dt.tz_convert("America/New_York")
+                    ev_cutoff = pd.Timestamp(f"{ev_date.date()} 16:00:00", tz="America/New_York")
+                    if ts_dt > ev_cutoff:
+                        is_post_close = True
+                except Exception:
+                    pass
+
+            # Determine effective decision date
+            effective_dt = None
+            if not is_post_close and ev_date in trading_set:
+                effective_dt = ev_date
+            else:
+                for t_d in sorted_trading:
+                    if is_post_close and t_d > ev_date:
+                        effective_dt = t_d
+                        break
+                    elif not is_post_close and t_d >= ev_date:
+                        effective_dt = t_d
+                        break
+
+            if effective_dt is not None:
+                rec = dict(row)
+                rec["effective_decision_date"] = effective_dt
+                rec["is_post_close"] = is_post_close
+                records.append(rec)
+
+        return pd.DataFrame(records)
+
+    @classmethod
+    def build_causal_fold_factors(
+        cls,
+        yield_train: pd.DataFrame,
+        yield_test: Optional[pd.DataFrame] = None,
+        maturities_dict: Optional[Dict[str, float]] = None,
+        lambda_param: float = 0.7308,
+    ) -> pd.DataFrame:
+        """
+        Rebuild fitted factor transformations within each training fold,
+        then apply them causally to later test observations.
+        
+        Zero lookahead:
+        - Kalman/DNS transition and observation matrices fitted strictly on yield_train.
+        - Initial state and covariance at end of training seed sequential filtering on yield_test.
+        """
+        from src.state_space.state_space import (
+            KalmanFilterSmoother,
+            estimate_and_filter_state_space,
+        )
+
+        if maturities_dict is None:
+            maturities_dict = {
+                "DGS1": 1.0, "DGS2": 2.0, "DGS3": 3.0, "DGS5": 5.0,
+                "DGS7": 7.0, "DGS10": 10.0, "DGS20": 20.0, "DGS30": 30.0,
+            }
+
+        y_tr = yield_train.copy()
+        if "date" not in y_tr.columns:
+            y_tr["date"] = y_tr.index
+
+        dns_res = estimate_and_filter_state_space(
+            y_tr,
+            maturities_dict=maturities_dict,
+            date_col="date",
+            lambda_param=lambda_param,
+            use_mle_optimization=False,
+        )
+
+        tr_states = dns_res.filtered_states[["level", "slope", "curvature"]].copy()
+        tr_states.columns = ["kf_level", "kf_slope", "kf_curvature"]
+        if "date" in dns_res.filtered_states.columns:
+            tr_states.index = pd.to_datetime(dns_res.filtered_states["date"])
+        else:
+            tr_states.index = yield_train.index[:len(tr_states)]
+        tr_states = tr_states.reindex(yield_train.index).ffill().bfill()
+
+        if yield_test is not None and len(yield_test) > 0:
+            b_train_end = dns_res.filtered_states.iloc[-1][["level", "slope", "curvature"]].values
+            P_train_end = dns_res.filtered_cov[-1]
+            cols = [c for c in yield_train.columns if c in maturities_dict]
+            cols = sorted(cols, key=lambda c: maturities_dict[c])
+            maturities = np.array([maturities_dict[c] for c in cols])
+
+            kf_smoother = KalmanFilterSmoother(
+                maturities=maturities,
+                lambda_param=lambda_param,
+                mu=dns_res.mu,
+                transition_matrix=dns_res.transition_matrix,
+                state_cov=dns_res.state_cov,
+                obs_cov=dns_res.obs_cov,
+            )
+            y_te_vals = yield_test[cols].ffill().bfill().values
+            _, _, beta_filt_test, _ = kf_smoother.sequential_predict_and_update(
+                y_te_vals,
+                initial_state=b_train_end,
+                initial_cov=P_train_end,
+            )
+            te_states = pd.DataFrame(
+                beta_filt_test,
+                index=yield_test.index,
+                columns=["kf_level", "kf_slope", "kf_curvature"],
+            )
+            full_factors = pd.concat([tr_states, te_states])
+        else:
+            full_factors = tr_states
+
+        return full_factors
+
+    @classmethod
     def build_feature_panel(
         cls,
         factor_df: pd.DataFrame,
@@ -111,15 +249,21 @@ class FactorFeatureEngineer:
             features[f"{col_name}_vol10d"] = raw_s.rolling(10, min_periods=5).std().fillna(0.0)
 
         # 6. Macro surprise features (strictly separate announcement and model surprise series)
-        m_df = macro_df.copy()
-        if "date" in m_df.columns:
+        m_df = macro_df.copy() if macro_df is not None and not macro_df.empty else pd.DataFrame()
+        if not m_df.empty and "date" in m_df.columns:
             m_df["date"] = pd.to_datetime(m_df["date"])
 
+        m_aligned = cls.align_macro_events_to_decisions(m_df, common_idx)
+
         for ind in cls.TARGET_INDICATORS:
-            sub = m_df[m_df["indicator"] == ind].sort_values("date")
-            # Map announcement surprise S_ann (deduplicate date index if multiple intraday events)
-            s_ann_map = sub.dropna(subset=["surprise_ann"]).drop_duplicates(subset=["date"], keep="last").set_index("date")["surprise_ann"]
-            s_mod_map = sub.dropna(subset=["surprise_model"]).drop_duplicates(subset=["date"], keep="last").set_index("date")["surprise_model"]
+            if not m_aligned.empty and "indicator" in m_aligned.columns:
+                sub = m_aligned[m_aligned["indicator"] == ind].sort_values("effective_decision_date")
+                # Map announcement surprise S_ann (deduplicate date index if multiple intraday events)
+                s_ann_map = sub.dropna(subset=["surprise_ann"]).drop_duplicates(subset=["effective_decision_date"], keep="last").set_index("effective_decision_date")["surprise_ann"]
+                s_mod_map = sub.dropna(subset=["surprise_model"]).drop_duplicates(subset=["effective_decision_date"], keep="last").set_index("effective_decision_date")["surprise_model"]
+            else:
+                s_ann_map = pd.Series(dtype=float)
+                s_mod_map = pd.Series(dtype=float)
 
             # Daily series aligned to trading calendar (0.0 on non-release days)
             ann_s = pd.Series(features.index.map(s_ann_map).fillna(0.0), index=features.index)

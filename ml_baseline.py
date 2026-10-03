@@ -535,7 +535,35 @@ def write_verdict_report(
     else:
         clip_finding_str = "Residual signal clipping diagnostics are unavailable."
 
-    content = f"""# Milestone 14 Verdict: Machine Learning Baseline & Feature Attribution
+    # Point-in-Time Evaluation Gate extraction
+    pit_gate = run_meta.get("point_in_time_gate", {})
+    pit_manifest = run_meta.get("point_in_time_manifest", {})
+    gate_verdict = pit_gate.get("gate_verdict", "NOT_EVALUABLE")
+    eval_tier = pit_gate.get("evaluation_tier", "DEVELOPMENT_EVIDENCE")
+    macro_alpha_verdict = pit_gate.get("macro_alpha_verdict", None)
+    alpha_display = macro_alpha_verdict if macro_alpha_verdict else "NONE (HOLD OUT NOT EVALUABLE - ALPHA CLAIMS BARRED)"
+    manifest_sha = pit_manifest.get("manifest_sha256", "N/A")
+    missing_reasons = pit_gate.get("missing_data_reasons", [])
+    missing_reasons_md = "\n".join([f"- {r}" for r in missing_reasons]) if missing_reasons else "- None"
+    min_reqs = pit_gate.get("minimum_predeclared_sample_requirements", {})
+
+    fold_cov_records = macro_audit.get("fold_event_coverage", pit_manifest.get("event_coverage_table", []))
+    if fold_cov_records:
+        fold_cov_lines = [
+            "| Fold | Training Cutoff | Test Window | Independent Releases | Active Event Days | Missing Consensus or Timestamps | Nonzero Overlay Days |",
+            "| :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
+        ]
+        for f in fold_cov_records:
+            fold_cov_lines.append(
+                f"| {f.get('Fold', 'N/A')} | {f.get('Train Cutoff', 'N/A')} | {f.get('Test Window', 'N/A')} | "
+                f"{f.get('Independent Releases', 0)} | {f.get('Active Event Days', 0)} | "
+                f"{f.get('Missing Consensus or Timestamps', 0)} | {f.get('Nonzero Overlay Days', 0)} |"
+            )
+        fold_cov_table_md = "\n".join(fold_cov_lines)
+    else:
+        fold_cov_table_md = "*Fold event coverage table unavailable.*"
+
+    content = f"""# Milestone 14 Verdict: Machine Learning Baseline & Point-in-Time Evaluation Gate
 
 **Author**: MacroRates Research Team  
 **Git Commit**: `{commit_hash}`  
@@ -544,17 +572,47 @@ def write_verdict_report(
 **Backend**: `{backend}` | **Seed**: `{seed}`  
 
 > [!IMPORTANT]
-> **RESEARCH INTEGRITY & CAUSALITY AUDIT DISCLOSURES**:
-> 1. **Macro Data Coverage & Status**: The committed macro dataset (`data/processed/macro_surprises.parquet`) {cov_end_str}. During the evaluated test period ({eval_start} to {eval_end}), there were **{macro_audit.get('total_calendar_events', macro_audit.get('total_test_events', 0))} calendar test events** and **{macro_audit.get('total_observed_decision_events', macro_audit.get('total_evaluated_decision_events', 0))} observed decision origin events**. Therefore, `DNS + Kalman + Macro` is formally audited and categorized as **`{macro_audit.get('evaluation_status', 'NOT_EVALUATED')}`**. No empirical claims of out-of-sample macro forecasting superiority or trading alpha are supported by this test window.
-> 2. **60% Exposure Control Finding**: {control_finding_text}
-> 3. **Observational vs. Causal Attribution**: TreeSHAP and Gini feature rankings describe statistical feature associations within gradient-boosted decision trees. They are descriptive diagnostics, NOT proof of causal macroeconomic transmission mechanisms.
-> 4. **Econometric Decomposition**: Traditional level-reconstruction models (Static NS, DNS Kalman) exhibit ~{trad_ns_rmse_str} bp 2s10s spread RMSE {predom_err_str}, which push spread forecasts into extreme values that saturate the $\\pm 1.0$ signal clip. The diagnostic residual-preserving formulation ($\\hat{{y}}_{{t+1|t}}^{{\\text{{res}}}} = y_t + \\Lambda(\\hat{{\\beta}}_{{t+1|t}} - \\beta_t)$) addresses this cross-sectional bias, {rmse_impact_str}.
-> 5. **Annualization & Statistics Corrections**: Sharpe and Sortino ratios are annualized with $\\sqrt{{252}}$ strictly on standard deviation ($(\\mu \\times 252) / (\\sigma \\times \\sqrt{{252}}) = (\\mu \\times \\sqrt{{252}}) / \\sigma$). Hit rates are computed strictly over active trading days; zero-trading benchmarks (Random Walk, Cash Only) report `N/A`, avoiding false 100% hit rate claims.
-> 6. **Benchmark Discipline**: Random Walk provides the unparameterized zero-increment curve forecasting benchmark. Cash-Only provides an unencumbered capital strategy benchmark. Models are evaluated on common out-of-sample test dates without retroactive tuning or artificial error multipliers.
+> **POINT-IN-TIME EVALUATION GATE & RESEARCH INTEGRITY DISCLOSURES**:
+> 1. **Holdout Evaluation Gate Verdict**: The evaluated {run_meta.get('total_eval_days', 'N/A')}-day sample is audited as **`{eval_tier}`**. The gate verdict is **`{gate_verdict}`**. An event-covered, genuinely untouched holdout is unavailable; therefore, **NO MACRO-ALPHA VERDICT IS REPORTED**.
+> 2. **Forecast vs. Trading Separation**: Yield curve and spread forecast accuracy (RMSE in basis points) are strictly separated from trading performance (Sharpe, Sortino, turnover, and PnL). Forecast evaluations assess econometric predictability; trading evaluations measure strategy execution under risk-budget constraints.
+> 3. **Research Proxy & Par Yield Disclosure**: Trading net PnL, Sharpe ratios, and DV01 returns are a synthetic research proxy based on daily rebalancing of constant-maturity Treasury yields. Any executable profit claim requires historical tradable futures or cash bond prices, contract rolls, bid-ask spreads, and financing costs. [U.S. Treasury Daily Treasury Par Yield Curve Rates](https://home.treasury.gov/policy-issues/financing-the-government/interest-rate-statistics/) are indicative market quotes based on FRBNY composite closing quotes.
+> 4. **Curve Provenance**: Yield curve forecasts for `DNS_Kalman_Macro` are tagged `COPIED_DNS_CURVE_FORECAST` regardless of overlay activity.
+> 5. **Macro Data Coverage & Status**: The committed macro dataset (`data/processed/macro_surprises.parquet`) {cov_end_str}. During the evaluated test period ({eval_start} to {eval_end}), there were **{macro_audit.get('total_calendar_events', macro_audit.get('total_test_events', 0))} calendar test events** and **{macro_audit.get('total_observed_decision_events', macro_audit.get('total_evaluated_decision_events', 0))} observed decision origin events**. Therefore, `DNS + Kalman + Macro` is formally audited and categorized as **`{macro_audit.get('evaluation_status', 'NOT_EVALUATED')}`**.
+> 6. **60% Exposure Control Finding**: {control_finding_text}
+> 7. **Observational vs. Causal Attribution**: TreeSHAP and Gini feature rankings describe statistical feature associations within gradient-boosted decision trees. They are descriptive diagnostics, NOT proof of causal macroeconomic transmission mechanisms.
+> 8. **Econometric Decomposition**: Traditional level-reconstruction models (Static NS, DNS Kalman) exhibit ~{trad_ns_rmse_str} bp 2s10s spread RMSE {predom_err_str}, which push spread forecasts into extreme values that saturate the $\\pm 1.0$ signal clip. The diagnostic residual-preserving formulation addresses this cross-sectional bias, {rmse_impact_str}.
+> 9. **Annualization & Statistics Corrections**: Sharpe and Sortino ratios are annualized with $\\sqrt{{252}}$ strictly on standard deviation ($(\\mu \\times 252) / (\\sigma \\times \\sqrt{{252}}) = (\\mu \\times \\sqrt{{252}}) / \\sigma$). Hit rates are computed strictly over active trading days; zero-trading benchmarks (Random Walk, Cash Only) report `N/A`, avoiding false 100% hit rate claims.
+> 10. **Benchmark Discipline**: Random Walk provides the unparameterized zero-increment curve forecasting benchmark. Cash-Only provides an unencumbered capital strategy benchmark. Models are evaluated on common out-of-sample test dates without retroactive tuning or artificial error multipliers.
 
 ---
 
-## 1. Run Provenance & Data Checksums
+## 1. Point-in-Time Evaluation Gate Verdict & Run Manifest
+
+| Gate Field | Status / Value | Audit Interpretation |
+| :--- | :---: | :--- |
+| **Gate Verdict** | **`{gate_verdict}`** | Formal point-in-time readiness gate determination |
+| **Evaluation Tier** | **`{eval_tier}`** | Development evidence (not an untouched holdout) |
+| **Macro-Alpha Verdict** | **`{alpha_display}`** | Alpha claims strictly barred until holdout criteria are met |
+| **Run Manifest SHA-256** | `{manifest_sha[:16] if manifest_sha else 'N/A'}` | Immutable run manifest serialized at `reports/point_in_time_manifest.json` |
+
+### Missing Data & Minimum Predeclared Sample Requirements
+**Missing Data Reasons**:
+{missing_reasons_md}
+
+**Predeclared Minimum Holdout Criteria**:
+- **Minimum Holdout Trading Days**: $\\ge {min_reqs.get('min_holdout_trading_days', 252)}$ trading days
+- **Minimum Independent Releases**: $\\ge {min_reqs.get('min_independent_releases', 20)}$ releases across {', '.join(min_reqs.get('required_indicators', ['CPI', 'NFP', 'FOMC']))}
+- **Minimum Active Event Days**: $\\ge {min_reqs.get('min_active_event_days', 10)}$ days
+- **Provenance Standard**: {min_reqs.get('required_provenance', 'Unrevised first-release actuals with timestamped consensus vintages.')}
+- **Execution Proxy**: {min_reqs.get('execution_proxy_requirement', 'Tradable instrument prices and contract rolls.')}
+
+### Event Coverage Table by Fold
+
+{fold_cov_table_md}
+
+---
+
+## 2. Run Provenance & Data Checksums
 
 | Input Panel | SHA-256 Checksum (16-char) | Path |
 | :--- | :--- | :--- |
@@ -564,7 +622,7 @@ def write_verdict_report(
 
 ---
 
-## 2. Macro Event Coverage Audit
+## 3. Macro Event Coverage Audit
 
 | Metric | Value | Interpretation |
 | :--- | :---: | :--- |
@@ -589,7 +647,7 @@ def write_verdict_report(
 
 ---
 
-## 3. Econometric Diagnostics & Error Decomposition
+## 4. Econometric Diagnostics & Error Decomposition
 
 ### Observable 2s10s Spread Forecast Error Decomposition ($e_s = u_{{\\text{{factor}}}} + u_{{\\text{{fit}}}}$)
 *Exact mathematical decomposition in the observable 2s10s spread space, including the twice uncentered second cross moment:*
@@ -624,7 +682,7 @@ def write_verdict_report(
 
 ---
 
-## 4. Feature Attribution Summary
+## 5. Feature Attribution Summary
 
 - **Level ($\\\\Delta L_{{t+1}}$)**: Key features by empirical split impact: `{top_lvl}`
 - **Slope ($\\\\Delta S_{{t+1}}$)**: Key features by empirical split impact: `{top_slp}`
@@ -634,13 +692,13 @@ def write_verdict_report(
 
 ---
 
-## 5. Common-Sample Out-of-Sample Performance Table
+## 6. Common-Sample Out-of-Sample Performance Table
 
 {table_md}
 
 ---
 
-## 6. Visual Diagnostics
+## 7. Visual Diagnostics
 - `reports/figures/gbm_shap_summary.png`: Displays top feature attribution drivers across Level, Slope, and Curvature.
 - `reports/figures/gbm_feature_importance.png`: Aggregated feature importance across term-structure dimensions.
 """
