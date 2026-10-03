@@ -1,7 +1,7 @@
 # Milestone 14 Verdict: Machine Learning Baseline & Point-in-Time Evaluation Gate
 
 **Author**: MacroRates Research Team  
-**Git Commit**: `c7eb2ea361f5b7871db6fe0b03080da27815afdd-dirty`  
+**Git Commit**: `841bf14c7b5734b350c6f09467c47ba8d4c5766d`  
 **Run Mode**: `QUICK_TWO_FOLD_EVALUATION` (Folds: 2)  
 **Evaluated Sample**: 2026-06-29 to 2026-09-17 (57 trading days)  
 **Backend**: `sklearn` | **Seed**: `42`  
@@ -28,7 +28,7 @@
 | **Gate Verdict** | **`NOT_EVALUABLE`** | Formal point-in-time readiness gate determination |
 | **Evaluation Tier** | **`DEVELOPMENT_EVIDENCE`** | Development evidence (not an untouched holdout) |
 | **Macro-Alpha Verdict** | **`NONE (HOLD OUT NOT EVALUABLE - ALPHA CLAIMS BARRED)`** | Alpha claims strictly barred until holdout criteria are met |
-| **Run Manifest SHA-256** | `97020ce19abee4c5` | Immutable run manifest serialized at `reports/point_in_time_manifest.json` |
+| **Run Manifest SHA-256** | `02deb45c45c8eef8` | Immutable run manifest serialized at `reports/point_in_time_manifest.json` |
 
 ### Missing Data & Minimum Predeclared Sample Requirements
 **Missing Data Reasons**:

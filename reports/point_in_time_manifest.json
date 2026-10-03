@@ -1,7 +1,7 @@
 {
   "run_id": "walk_forward_evaluation",
-  "generated_at_utc": "2026-10-03T22:51:38.435234+00:00",
-  "git_commit": "c7eb2ea361f5b7871db6fe0b03080da27815afdd-dirty",
+  "generated_at_utc": "2026-10-03T22:59:23.226272+00:00",
+  "git_commit": "841bf14c7b5734b350c6f09467c47ba8d4c5766d-dirty",
   "run_mode": "QUICK_TWO_FOLD_EVALUATION",
   "evaluation_tier": "DEVELOPMENT_EVIDENCE",
   "gate_verdict": "NOT_EVALUABLE",
@@ -3202,5 +3202,5 @@
     "treasury_url": "https://home.treasury.gov/policy-issues/financing-the-government/interest-rate-statistics/",
     "curve_provenance": "DNS_Kalman_Macro yield predictions are labeled COPIED_DNS_CURVE_FORECAST."
   },
-  "manifest_sha256": "97020ce19abee4c51a0f341f8143e5d534bcb26874e38da8cbe57c6ce4692ebc"
+  "manifest_sha256": "28b9d85b6c6cb94a0f233701e80146aaa2a90ed45e43ef197f7fd0daf59eca06"
 }
